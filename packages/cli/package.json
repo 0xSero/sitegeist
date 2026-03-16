@@ -1,0 +1,14 @@
+{
+	"name": "@sitegeist/cli",
+	"version": "0.4.10",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "node ../../scripts/build.mjs",
+		"typecheck": "tsc -p ../../tsconfig.json --noEmit"
+	},
+	"dependencies": {
+		"@sitegeist/shared": "*",
+		"ws": "8.18.3"
+	}
+}

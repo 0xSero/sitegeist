@@ -1,12 +1,12 @@
 {
 	"compilerOptions": {
-		"rootDir": "./src",
+		"rootDir": ".",
 		"outDir": "./dist",
 		"lib": ["ES2022", "DOM", "DOM.Iterable"],
 		"module": "ESNext",
 		"moduleResolution": "Bundler",
 		"target": "ES2022",
-		"types": ["chrome"],
+		"types": ["chrome", "node"],
 		"strict": true,
 		"esModuleInterop": true,
 		"skipLibCheck": true,
@@ -15,8 +15,11 @@
 		"isolatedModules": true,
 		"noEmit": true,
 		"experimentalDecorators": true,
-		"useDefineForClassFields": false
+		"useDefineForClassFields": false,
+		"paths": {
+			"@sitegeist/shared": ["./packages/shared/src/index.ts"]
+		}
 	},
-	"include": ["src/**/*.ts"],
+	"include": ["src/**/*.ts", "packages/**/*.ts"],
 	"exclude": ["dist", "node_modules"]
 }

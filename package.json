@@ -5,16 +5,26 @@
 	"description": "AI-powered browser extension for web navigation and interaction",
 	"type": "module",
 	"main": "dist/background.js",
+	"workspaces": [
+		"packages/*"
+	],
 	"scripts": {
-		"clean": "rm -rf dist-chrome",
+		"clean": "rm -rf dist-chrome dist-cli dist-relay dist-electron-agent dist-desktop",
 		"build:chrome": "node ./scripts/build.mjs && tailwindcss -i ./src/app.css -o ./dist-chrome/app.css --minify",
 		"build": "npm run build:chrome",
+		"relay:daemon": "node dist-relay/relay-daemon.js",
+		"relay": "node dist-relay/relay.js",
+		"relay:secure": "node scripts/relay-secure.mjs",
+		"sitegeist": "node dist-cli/sitegeist.js",
+		"electron:agent": "node dist-electron-agent/electron-agent.js",
+		"electron:secure": "node scripts/electron-agent-secure.mjs",
 		"dev": "concurrently -n \"build,css,server\" -c \"blue,green,yellow\" \"node ./scripts/build.mjs --watch\" \"tailwindcss -i ./src/app.css -o ./dist-chrome/app.css --watch\" \"node ./scripts/dev-server.mjs\"",
 		"typecheck": "tsc --noEmit",
 		"check": "biome check --write . && tsc --noEmit && cd site && npm run check",
 		"prepare": "husky"
 	},
 	"dependencies": {
+		"@sitegeist/shared": "file:./packages/shared",
 		"@mariozechner/jailjs": "^0.1.0",
 		"@mariozechner/mini-lit": "file:../mini-lit",
 		"@mariozechner/pi-agent-core": "file:../pi-mono/packages/agent",
@@ -34,13 +44,16 @@
 		"pdfjs-dist": "5.4.394",
 		"three": "^0.180.0",
 		"tsx": "^4.20.6",
+		"ws": "^8.18.0",
 		"xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",
 		"@tailwindcss/cli": "^4.0.0-beta.14",
 		"@types/chrome": "^0.1.24",
+		"@types/node": "^22.10.5",
 		"@types/webextension-polyfill": "^0.12.4",
+		"agent-browser": "^0.11.1",
 		"concurrently": "^9.2.1",
 		"esbuild": "^0.25.10",
 		"husky": "^9.1.7",

@@ -11,23 +11,31 @@ const staticDir = join(packageRoot, "static");
 
 // Chrome only
 const targetBrowser = "chrome";
-const outDir = join(packageRoot, "dist-chrome");
+const extensionOutDir = join(packageRoot, "dist-chrome");
+const cliOutDir = join(packageRoot, "dist-cli");
+const relayOutDir = join(packageRoot, "dist-relay");
+const electronAgentOutDir = join(packageRoot, "dist-electron-agent");
 
 const entryPoints = {
 	sidepanel: join(packageRoot, "src/sidepanel.ts"),
 	debug: join(packageRoot, "src/debug.ts"),
 	icons: join(packageRoot, "src/icons.ts"),
 	background: join(packageRoot, "src/background.ts"),
+	offscreen: join(packageRoot, "src/offscreen.ts"),
+	"content-recording": join(packageRoot, "src/content-recording.ts"),
 };
 
-rmSync(outDir, { recursive: true, force: true });
-mkdirSync(outDir, { recursive: true });
+rmSync(extensionOutDir, { recursive: true, force: true });
+mkdirSync(extensionOutDir, { recursive: true });
+mkdirSync(cliOutDir, { recursive: true });
+mkdirSync(relayOutDir, { recursive: true });
+mkdirSync(electronAgentOutDir, { recursive: true });
 
 const buildOptions = {
 	absWorkingDir: packageRoot,
 	entryPoints,
 	bundle: true,
-	outdir: outDir,
+	outdir: extensionOutDir,
 	format: "esm",
 	target: ["chrome120"],
 	platform: "browser",
@@ -46,6 +54,7 @@ const buildOptions = {
 	// Force all mini-lit and lit imports to resolve to sitegeist's node_modules
 	alias: {
 		process: join(packageRoot, "scripts/process-shim.js"),
+		"@sitegeist/shared": join(packageRoot, "packages/shared/src/index.ts"),
 		"@mariozechner/mini-lit": join(packageRoot, "node_modules/@mariozechner/mini-lit"),
 		lit: join(packageRoot, "node_modules/lit"),
 		"lit/decorators.js": join(packageRoot, "node_modules/lit/decorators.js"),
@@ -62,7 +71,7 @@ const getStaticFiles = () => {
 const copyStatic = () => {
 	// Use browser-specific manifest
 	const manifestSource = join(packageRoot, `static/manifest.${targetBrowser}.json`);
-	const manifestDest = join(outDir, "manifest.json");
+	const manifestDest = join(extensionOutDir, "manifest.json");
 	copyFileSync(manifestSource, manifestDest);
 
 	// Copy all files from static/ directory (except manifest files)
@@ -73,7 +82,7 @@ const copyStatic = () => {
 		if (filename.startsWith("manifest.")) continue;
 
 		const source = join(packageRoot, relative);
-		const destination = join(outDir, filename);
+		const destination = join(extensionOutDir, filename);
 		copyFileSync(source, destination);
 	}
 
@@ -82,12 +91,12 @@ const copyStatic = () => {
 	if (!existsSync(pdfWorkerSource)) {
 		pdfWorkerSource = join(packageRoot, "../../node_modules/pdfjs-dist/build/pdf.worker.min.mjs");
 	}
-	const pdfWorkerDestDir = join(outDir, "pdfjs-dist/build");
+	const pdfWorkerDestDir = join(extensionOutDir, "pdfjs-dist/build");
 	mkdirSync(pdfWorkerDestDir, { recursive: true });
 	const pdfWorkerDest = join(pdfWorkerDestDir, "pdf.worker.min.mjs");
 	copyFileSync(pdfWorkerSource, pdfWorkerDest);
 
-	console.log(`Built for ${targetBrowser} in ${outDir}`);
+	console.log(`Built for ${targetBrowser} in ${extensionOutDir}`);
 };
 
 const run = async () => {
@@ -95,6 +104,7 @@ const run = async () => {
 		const ctx = await context(buildOptions);
 		await ctx.watch();
 		copyStatic();
+		await buildNodeTargets();
 
 		// Watch the entire static directory
 		watch(staticDir, { recursive: true }, (eventType) => {
@@ -117,8 +127,46 @@ const run = async () => {
 	} else {
 		await build(buildOptions);
 		copyStatic();
+		await buildNodeTargets();
 	}
 };
+
+const nodeBaseOptions = {
+	absWorkingDir: packageRoot,
+	bundle: true,
+	format: "esm",
+	platform: "node",
+	target: ["node20"],
+	sourcemap: isWatch ? "inline" : true,
+	define: {
+		"process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV ?? (isWatch ? "development" : "production")),
+	},
+};
+
+async function buildNodeTargets() {
+	await build({
+		...nodeBaseOptions,
+		entryPoints: { sitegeist: join(packageRoot, "packages/cli/src/main.ts") },
+		outdir: cliOutDir,
+	});
+
+	await build({
+		...nodeBaseOptions,
+		entryPoints: {
+			relay: join(packageRoot, "packages/cli/src/main.ts"),
+			"relay-daemon": join(packageRoot, "packages/cli/src/daemon.ts"),
+		},
+		outdir: relayOutDir,
+	});
+
+	await build({
+		...nodeBaseOptions,
+		entryPoints: {
+			"electron-agent": join(packageRoot, "packages/electron-agent/src/main.ts"),
+		},
+		outdir: electronAgentOutDir,
+	});
+}
 
 run().catch((error) => {
 	console.error(error);

@@ -2,17 +2,10 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
-import {
-	Agent,
-	type AgentEvent,
-	type AgentMessage,
-	type AgentState,
-	type AgentTool,
-} from "@mariozechner/pi-agent-core";
+import { Agent, type AgentEvent, type AgentMessage, type AgentState } from "@mariozechner/pi-agent-core";
 import { getModel, getModels, type Model } from "@mariozechner/pi-ai";
 import {
 	ChatPanel,
-	createExtractDocumentTool,
 	createStreamFn,
 	ModelSelector,
 	ProxyTab,
@@ -22,14 +15,18 @@ import {
 	setShowJsonMode,
 } from "@mariozechner/pi-web-ui";
 import { html, render } from "lit";
-import { History, Plus, Settings } from "lucide";
+import { Circle, Download, History, Plus, Settings, Square, WandSparkles } from "lucide";
 import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
 import { ApiKeysOAuthTab } from "./dialogs/ApiKeysOAuthTab.js";
 import { CostsTab } from "./dialogs/CostsTab.js";
+import { ExportDialog } from "./dialogs/ExportDialog.js";
+import { LookAndFeelTab } from "./dialogs/LookAndFeelTab.js";
+import { RelayTab } from "./dialogs/RelayTab.js";
 import { SessionCostDialog } from "./dialogs/SessionCostDialog.js";
 import { SitegeistSessionListDialog } from "./dialogs/SessionListDialog.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
+import { ToolsTab } from "./dialogs/ToolsTab.js";
 import { UpdateNotificationDialog } from "./dialogs/UpdateNotificationDialog.js";
 import { UserScriptsPermissionDialog } from "./dialogs/UserScriptsPermissionDialog.js";
 import { WelcomeSetupDialog } from "./dialogs/WelcomeSetupDialog.js";
@@ -43,14 +40,13 @@ import { registerUserMessageRenderer } from "./messages/UserMessageRenderer.js";
 import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
+import type { RecordedContext, RecordingScreenshot, RecordingState } from "./recording/types.js";
+import { DEFAULT_MODELS, getProvidersWithKeys } from "./runtime/model-defaults.js";
+import { createSitegeistTools } from "./runtime/tool-factory.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
-import { DebuggerTool } from "./tools/debugger.js";
-import { ExtractImageTool, registerExtractImageRenderer } from "./tools/extract-image.js";
-import { AskUserWhichElementTool, skillTool } from "./tools/index.js";
-import { NativeInputEventsRuntimeProvider } from "./tools/NativeInputEventsRuntimeProvider.js";
-import { isToolNavigating, NavigateTool } from "./tools/navigate.js";
-import { createReplTool } from "./tools/repl/repl.js";
-import { BrowserJsRuntimeProvider, NavigateRuntimeProvider } from "./tools/repl/runtime-providers.js";
+import { registerExtractImageRenderer } from "./tools/extract-image.js";
+import { isToolNavigating } from "./tools/navigate.js";
+import { loadLookAndFeelSettings } from "./utils/look-and-feel.js";
 import * as port from "./utils/port.js";
 import "./utils/i18n-extension.js";
 import "./utils/live-reload.js";
@@ -75,6 +71,93 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 		}
 		return true; // Keep channel open for async response
 	}
+	if (message.type === "recording_tick") {
+		recordingState = {
+			status: "recording",
+			tabId: recordingState?.tabId || 0,
+			startedAt: recordingState?.startedAt || Date.now() - Number(message.elapsedMs || 0),
+			elapsedMs: Number(message.elapsedMs || 0),
+			screenshotCount: Number(message.screenshotCount || 0),
+			eventCount: Number(message.eventCount || 0),
+		};
+		renderApp();
+		sendResponse({ success: true });
+		return true;
+	}
+	if (message.type === "recording_complete") {
+		recordingState = recordingState ? { ...recordingState, status: "selecting" } : null;
+		const screenshots = Array.isArray(message.screenshots) ? (message.screenshots as RecordingScreenshot[]) : [];
+		void chrome.runtime.sendMessage({
+			type: "recording_select_images",
+			selectedIds: screenshots.map((shot) => shot.id),
+		});
+		renderApp();
+		sendResponse({ success: true });
+		return true;
+	}
+	if (message.type === "recording_context_ready") {
+		lastRecordedContext = message.context as RecordedContext;
+		recordingState = recordingState ? { ...recordingState, status: "ready" } : null;
+		renderApp();
+		sendResponse({ success: true });
+		return true;
+	}
+	if (message.type === "recording_error") {
+		recordingState = null;
+		renderApp();
+		sendResponse({ success: true });
+		return true;
+	}
+	if (message.type === "relay_agent_run") {
+		if (!chatPanel?.agentInterface || !agent) {
+			sendResponse({ success: false, error: "No active sidepanel agent is ready" });
+			return true;
+		}
+		if (agent.state.isStreaming) {
+			sendResponse({ success: false, error: "Agent is already busy" });
+			return true;
+		}
+
+		const runId = String(message.runId || "");
+		const prompt = String(message.prompt || "");
+		const selectedTabIds = Array.isArray(message.selectedTabIds) ? (message.selectedTabIds as number[]) : [];
+		const agentInterface = chatPanel.agentInterface;
+		sendResponse({ success: true });
+
+		void (async () => {
+			try {
+				if (selectedTabIds.length > 0) {
+					await chrome.tabs.update(selectedTabIds[0], { active: true });
+				}
+				await chrome.runtime.sendMessage({
+					type: "relay_run_event",
+					runId,
+					event: { type: "started", selectedTabIds },
+				});
+				await agentInterface.sendMessage(prompt);
+				while (agent.state.isStreaming) {
+					await new Promise((resolve) => setTimeout(resolve, 100));
+				}
+				const lastAssistant = [...agent.state.messages].reverse().find((entry) => entry.role === "assistant") as
+					| { content?: unknown }
+					| undefined;
+				await chrome.runtime.sendMessage({
+					type: "relay_run_done",
+					runId,
+					status: "completed",
+					final: lastAssistant?.content || null,
+				});
+			} catch (error) {
+				await chrome.runtime.sendMessage({
+					type: "relay_run_done",
+					runId,
+					status: "failed",
+					error: error instanceof Error ? error.message : String(error ?? "Run failed"),
+				});
+			}
+		})();
+		return true;
+	}
 });
 
 // ============================================================================
@@ -93,6 +176,8 @@ let agent: Agent;
 let chatPanel: ChatPanel;
 let agentUnsubscribe: (() => void) | undefined;
 let currentWindowId: number;
+let recordingState: RecordingState | null = null;
+let lastRecordedContext: RecordedContext | null = null;
 
 // Track which skills we've shown in full (skillName -> lastUpdated timestamp)
 // Reset when a new session/agent is created
@@ -105,34 +190,8 @@ const recordedCostMessages = new Set<AgentMessage>();
 // Cached auth type label for the current provider
 let authLabel = "";
 
-const DEFAULT_MODELS: Record<string, string> = {
-	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
-	anthropic: "claude-sonnet-4-6",
-	"azure-openai-responses": "gpt-5.2",
-	cerebras: "zai-glm-4.6",
-	"github-copilot": "gpt-4o",
-	google: "gemini-2.5-flash",
-	"google-antigravity": "gemini-3.1-pro-high",
-	"google-gemini-cli": "gemini-2.5-pro",
-	"google-vertex": "gemini-3-pro-preview",
-	groq: "openai/gpt-oss-20b",
-	huggingface: "moonshotai/Kimi-K2.5",
-	"kimi-coding": "kimi-k2-thinking",
-	minimax: "MiniMax-M2.1",
-	"minimax-cn": "MiniMax-M2.1",
-	mistral: "devstral-medium-latest",
-	openai: "gpt-4o-mini",
-	"openai-codex": "gpt-5.1-codex-mini",
-	opencode: "claude-opus-4-6",
-	"opencode-go": "kimi-k2.5",
-	openrouter: "openai/gpt-5.1-codex",
-	"vercel-ai-gateway": "anthropic/claude-opus-4-6",
-	xai: "grok-4-fast-non-reasoning",
-	zai: "glm-4.6",
-};
-
 async function selectDefaultModelForAvailableProvider() {
-	const providers = await getProvidersWithKeys();
+	const providers = await getProvidersWithKeys(storage);
 	if (providers.length === 0 || !agent) return;
 
 	// Try each provider with keys and find a default model
@@ -163,16 +222,6 @@ async function selectDefaultModelForAvailableProvider() {
 	}
 }
 
-async function getProvidersWithKeys(): Promise<string[]> {
-	const providers = await storage.providerKeys.list();
-	const result: string[] = [];
-	for (const provider of providers) {
-		const key = await storage.providerKeys.get(provider);
-		if (key) result.push(provider);
-	}
-	return result;
-}
-
 async function hasAnyApiKey(): Promise<boolean> {
 	const providers = await storage.providerKeys.list();
 	return providers.length > 0;
@@ -181,7 +230,34 @@ async function hasAnyApiKey(): Promise<boolean> {
 function openApiKeysDialog(): Promise<void> {
 	return new Promise((resolve) => {
 		SettingsDialog.open(
-			[new ApiKeysOAuthTab(), new CostsTab(), new SkillsTab(), new ProxyTab(), new AboutTab()],
+			[
+				new ApiKeysOAuthTab(),
+				new LookAndFeelTab(),
+				new ToolsTab(),
+				new RelayTab(),
+				new CostsTab(),
+				new SkillsTab(),
+				new ProxyTab(),
+				new AboutTab(),
+			],
+			resolve,
+		);
+	});
+}
+
+function openSettingsDialog(_onClose?: () => void): Promise<void> {
+	return new Promise((resolve) => {
+		SettingsDialog.open(
+			[
+				new ApiKeysOAuthTab(),
+				new LookAndFeelTab(),
+				new ToolsTab(),
+				new RelayTab(),
+				new CostsTab(),
+				new SkillsTab(),
+				new ProxyTab(),
+				new AboutTab(),
+			],
 			resolve,
 		);
 	});
@@ -239,6 +315,49 @@ const shouldSaveSession = (messages: AgentMessage[]): boolean => {
 	const hasUserMsg = messages.some((m: AgentMessage) => m.role === "user");
 	const hasAssistantMsg = messages.some((m: AgentMessage) => m.role === "assistant");
 	return hasUserMsg && hasAssistantMsg;
+};
+
+const promptCreateSkillFromSession = async () => {
+	if (!chatPanel?.agentInterface || !agent) return;
+	const prompt = `Create or update a reusable site skill from this current session.
+
+Requirements:
+- infer the primary site/domain from the session
+- use the skill tool
+- save a practical skill with domain patterns, short description, description, examples, and library code
+- prefer small reusable functions over one giant script
+- if the session does not yet provide enough evidence to build a reliable skill, say exactly what is missing and do not guess`;
+	await chatPanel.agentInterface.sendMessage(prompt);
+};
+
+const promptCreateSkillFromRecording = async () => {
+	if (!lastRecordedContext || !chatPanel?.agentInterface) return;
+	await chatPanel.agentInterface.sendMessage(`Create or update a reusable site skill from this recording summary:
+
+${lastRecordedContext.summary}
+
+Use the skill tool. Do not guess missing DOM structure beyond what the recording summary supports.`);
+};
+
+const toggleRecording = async () => {
+	if (recordingState?.status === "recording") {
+		await chrome.runtime.sendMessage({ type: "recording_stop" });
+		return;
+	}
+	const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+	const response = await chrome.runtime.sendMessage({ type: "recording_start", tabId: tab?.id });
+	if (response?.success) {
+		recordingState = {
+			status: "recording",
+			tabId: tab?.id || 0,
+			startedAt: Date.now(),
+			elapsedMs: 0,
+			screenshotCount: 0,
+			eventCount: 0,
+		};
+		lastRecordedContext = null;
+		renderApp();
+	}
 };
 
 const saveSession = async () => {
@@ -326,6 +445,20 @@ const updateUrl = (sessionId: string) => {
 	window.history.replaceState({}, "", url);
 };
 
+const ensureCurrentSessionId = async (): Promise<string> => {
+	if (currentSessionId) return currentSessionId;
+	currentSessionId = crypto.randomUUID();
+	await port
+		.sendMessage({
+			type: "acquireLock",
+			sessionId: currentSessionId,
+			windowId: currentWindowId,
+		})
+		.catch((error) => console.warn("Failed to acquire lock for orchestrator session", error));
+	updateUrl(currentSessionId);
+	return currentSessionId;
+};
+
 const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true) => {
 	if (agentUnsubscribe) {
 		agentUnsubscribe();
@@ -360,7 +493,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			defaultModel = savedModel;
 		} else {
 			// Try to find a default model for a provider the user already has a key for
-			const providersWithKeys = await getProvidersWithKeys();
+			const providersWithKeys = await getProvidersWithKeys(storage);
 			for (const provider of providersWithKeys) {
 				const modelId = DEFAULT_MODELS[provider];
 				if (modelId) {
@@ -465,7 +598,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			return await ApiKeyOrOAuthDialog.prompt(provider);
 		},
 		onModelSelect: async () => {
-			const providers = await getProvidersWithKeys();
+			const providers = await getProvidersWithKeys(storage);
 			if (providers.length === 0) {
 				openApiKeysDialog();
 				return;
@@ -516,52 +649,15 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			SessionCostDialog.open(agent.state.messages);
 		},
 		toolsFactory: (_agent, _agentInterface, _artifactsPanel, runtimeProvidersFactory) => {
-			const navigateTool = new NavigateTool();
-			const selectElementTool = new AskUserWhichElementTool();
-
-			// Create extract_document tool with CORS proxy from settings (loaded above)
-			const extractDocumentTool = createExtractDocumentTool();
-			if (corsProxyEnabled && corsProxyUrl) {
-				extractDocumentTool.corsProxyUrl = `${corsProxyUrl}/?url=`;
-			}
-
-			const replTool = createReplTool();
-			replTool.sandboxUrlProvider = () => chrome.runtime.getURL("sandbox.html");
-
-			// Extend base providers with browser orchestration capabilities
-			replTool.runtimeProvidersFactory = () => {
-				// Providers that should be available in page context via browserjs()
-				const pageProviders = [
-					...runtimeProvidersFactory(), // attachments + artifacts from ChatPanel
-					new NativeInputEventsRuntimeProvider(), // trusted browser events
-				];
-
-				return [
-					...pageProviders, // Make them available in REPL context too
-					new BrowserJsRuntimeProvider(pageProviders), // Pass to page context
-					new NavigateRuntimeProvider(navigateTool),
-				];
-			};
-
-			const extractImageTool = new ExtractImageTool();
-			extractImageTool.windowId = currentWindowId;
-
-			const tools: AgentTool<any, any>[] = [
-				navigateTool,
-				selectElementTool,
-				replTool,
-				skillTool,
-				extractDocumentTool,
-				extractImageTool,
-			];
-
-			// Conditionally add debugger tool if enabled
-			if (debuggerModeEnabled) {
-				const debuggerTool = new DebuggerTool();
-				tools.push(debuggerTool);
-			}
-
-			return tools;
+			return createSitegeistTools({
+				currentWindowId,
+				debuggerModeEnabled: Boolean(debuggerModeEnabled),
+				corsProxyEnabled: corsProxyEnabled === true,
+				corsProxyUrl: corsProxyUrl || undefined,
+				sandboxUrlProvider: () => chrome.runtime.getURL("sandbox.html"),
+				ensureSessionId: ensureCurrentSessionId,
+				runtimeProvidersFactory,
+			});
 		},
 	});
 
@@ -699,15 +795,48 @@ const renderApp = () => {
 					${Button({
 						variant: "ghost",
 						size: "sm",
-						children: icon(Settings, "sm"),
+						children: icon(recordingState?.status === "recording" ? Square : Circle, "sm"),
+						onClick: () => toggleRecording(),
+						title:
+							recordingState?.status === "recording"
+								? `Stop recording (${recordingState.screenshotCount} shots, ${recordingState.eventCount} events)`
+								: "Start recording",
+					})}
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						children: icon(WandSparkles, "sm"),
+						onClick: () => promptCreateSkillFromSession(),
+						title: "Create skill from this session",
+					})}
+					${
+						lastRecordedContext
+							? Button({
+									variant: "ghost",
+									size: "sm",
+									children: icon(WandSparkles, "sm"),
+									onClick: () => promptCreateSkillFromRecording(),
+									title: "Create skill from last recording",
+								})
+							: ""
+					}
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						children: icon(Download, "sm"),
 						onClick: () =>
-							SettingsDialog.open([
-								new ApiKeysOAuthTab(),
-								new CostsTab(),
-								new SkillsTab(),
-								new ProxyTab(),
-								new AboutTab(),
-							]),
+							ExportDialog.open({
+								messages: agent?.state.messages || [],
+								title: currentTitle,
+								sessionId: currentSessionId,
+							}),
+						title: "Export",
+					})}
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						children: icon(Settings, "sm"),
+						onClick: () => openSettingsDialog(),
 						title: "Settings",
 					})}
 				</div>
@@ -918,6 +1047,7 @@ async function initApp() {
 	const stored = await chrome.storage.local.get("showJsonMode");
 	const showJsonModeEnabled = (stored.showJsonMode as boolean) || false;
 	setShowJsonMode(showJsonModeEnabled);
+	await loadLookAndFeelSettings();
 
 	// Get current window ID for filtering tab events
 	const currentWindow = await chrome.windows.getCurrent();

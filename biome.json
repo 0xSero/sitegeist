@@ -34,6 +34,15 @@
 		}
 	},
 	"files": {
-		"includes": ["src/**/*", "scripts/**/*", "*.json", "*.md", "!**/node_modules/**/*", "!site", "!!**/node_modules"]
+		"includes": [
+			"src/**/*",
+			"packages/**/*",
+			"scripts/**/*",
+			"*.json",
+			"*.md",
+			"!**/node_modules/**/*",
+			"!site",
+			"!!**/node_modules"
+		]
 	}
 }

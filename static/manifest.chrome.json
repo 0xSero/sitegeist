@@ -32,11 +32,14 @@
 		"storage",
 		"unlimitedStorage",
 		"activeTab",
+		"offscreen",
 		"scripting",
 		"sidePanel",
 		"userScripts",
 		"webNavigation",
-		"debugger"
+		"debugger",
+		"declarativeNetRequest",
+		"declarativeNetRequestWithHostAccess"
 	],
 	"host_permissions": [
 		"http://*/*",

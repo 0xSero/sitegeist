@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Offscreen relay agent runtime so `agent.run` no longer depends on an open sidepanel
+- Relay session tab selection and minimal orchestrator plan RPC state (`session.setTabs`, `session.get`, `orchestrator.plan.*`, `orchestrator.task.update`)
+
+### Changed
+
+- Sidepanel and offscreen runtimes now share model-default and tool-factory helpers to reduce duplicated agent wiring
+
 ## [1.0.0] - 2026-03-15
 
 ### Added

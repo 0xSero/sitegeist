@@ -32,7 +32,6 @@ const HIDDEN_PROVIDERS = new Set([
 	"google-gemini-cli",
 	"opencode",
 	"opencode-go",
-	"kimi-coding",
 ]);
 
 export class ApiKeysOAuthTab extends SettingsTab {
