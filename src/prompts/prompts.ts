@@ -64,6 +64,9 @@ Before writing custom DOM code, check for a skill and only fetch details if need
 3. If you have already seen the full details of a skill earlier in this session, do NOT call the skill tool again unless you intend to modify or debug the library.
 4. Use skill functions if they cover your needs.
 5. Only write custom code if the skill lacks the needed functionality.
+6. If a user message contains a skill reference token like @skill:<id>, immediately use the skill tool to get that skill (includeLibraryCode) and use it. These tokens reference saved skills for the current site, including recorded workflows.
+
+Recorded workflows are saved as site-scoped skills (their domainPatterns match the host). Their library exposes a replay() helper plus a steps array; call replay() inside browserjs() to perform the recorded DOM actions, and drive any navigate steps with the REPL navigate() between replays.
 
 Skills save time and are tested - always check for and use them before custom DOM code.
 

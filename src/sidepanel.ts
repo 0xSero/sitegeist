@@ -22,11 +22,14 @@ import {
 	setShowJsonMode,
 } from "@mariozechner/pi-web-ui";
 import { html, render } from "lit";
-import { History, Plus, Settings } from "lucide";
+import { Circle, Download, History, Plus, Settings, Square } from "lucide";
+import { Toast } from "./components/Toast.js";
 import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
 import { ApiKeysOAuthTab } from "./dialogs/ApiKeysOAuthTab.js";
 import { CostsTab } from "./dialogs/CostsTab.js";
+import { CustomProvidersTab } from "./dialogs/CustomProvidersTab.js";
+import { RecordSkillDialog } from "./dialogs/RecordSkillDialog.js";
 import { SessionCostDialog } from "./dialogs/SessionCostDialog.js";
 import { SitegeistSessionListDialog } from "./dialogs/SessionListDialog.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
@@ -43,6 +46,7 @@ import { registerUserMessageRenderer } from "./messages/UserMessageRenderer.js";
 import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
+import { Recorder } from "./recording/recorder.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
 import { DebuggerTool } from "./tools/debugger.js";
 import { ExtractImageTool, registerExtractImageRenderer } from "./tools/extract-image.js";
@@ -51,6 +55,8 @@ import { NativeInputEventsRuntimeProvider } from "./tools/NativeInputEventsRunti
 import { isToolNavigating, NavigateTool } from "./tools/navigate.js";
 import { createReplTool } from "./tools/repl/repl.js";
 import { BrowserJsRuntimeProvider, NavigateRuntimeProvider } from "./tools/repl/runtime-providers.js";
+import { syncCustomProviderCorsRules } from "./utils/custom-provider-cors.js";
+import { downloadChatMarkdown } from "./utils/export-chat.js";
 import * as port from "./utils/port.js";
 import "./utils/i18n-extension.js";
 import "./utils/live-reload.js";
@@ -104,6 +110,82 @@ const recordedCostMessages = new Set<AgentMessage>();
 
 // Cached auth type label for the current provider
 let authLabel = "";
+
+// Interaction recorder (record → save as site-scoped skill)
+let recorder: Recorder | undefined;
+let isRecording = false;
+
+/**
+ * Slash-command provider for the chat input: lists skills (recordings included),
+ * site-scoped first, and inserts an @skill:<id> reference the agent retrieves.
+ */
+function buildSkillSlashProvider() {
+	return async (query: string) => {
+		let url: string | undefined;
+		try {
+			const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+			url = tab?.url;
+		} catch {
+			/* ignore */
+		}
+		const all = await storage.skills.list();
+		const onSite = url ? await storage.skills.list(url) : [];
+		const onSiteNames = new Set(onSite.map((s) => s.name));
+		const ordered = [...onSite, ...all.filter((s) => !onSiteNames.has(s.name))];
+		const q = query.toLowerCase();
+		const filtered = q
+			? ordered.filter(
+					(s) => s.name.toLowerCase().includes(q) || (s.shortDescription || "").toLowerCase().includes(q),
+				)
+			: ordered;
+		return filtered.slice(0, 20).map((s) => ({
+			id: s.name,
+			title: s.name,
+			description: s.shortDescription,
+			hint: onSiteNames.has(s.name) ? "this site" : s.domainPatterns[0],
+			value: `@skill:${s.name}`,
+		}));
+	};
+}
+
+async function toggleRecording() {
+	if (isRecording && recorder) {
+		const current = recorder;
+		recorder = undefined;
+		isRecording = false;
+		renderApp();
+		try {
+			const result = await current.stop();
+			RecordSkillDialog.open(result);
+		} catch (err) {
+			console.error("Failed to stop recording:", err);
+			Toast.error("Failed to stop recording");
+		}
+		return;
+	}
+
+	const next = new Recorder();
+	try {
+		await next.start();
+		recorder = next;
+		isRecording = true;
+		Toast.success("Recording — interact with the page, then click stop");
+		renderApp();
+	} catch (err) {
+		console.error("Failed to start recording:", err);
+		Toast.error("Cannot record this page");
+	}
+}
+
+function downloadCurrentChat() {
+	if (!agent) return;
+	const messages = agent.state.messages.filter((m) => m.role !== "welcome");
+	if (messages.length === 0) {
+		Toast.error("Nothing to export yet");
+		return;
+	}
+	downloadChatMarkdown(messages, currentTitle || "Sitegeist chat", agent.state.model);
+}
 
 const DEFAULT_MODELS: Record<string, string> = {
 	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
@@ -161,6 +243,19 @@ async function selectDefaultModelForAvailableProvider() {
 			return;
 		}
 	}
+
+	// Fall back to the first model of a custom provider (not in the built-in registry)
+	const customProviders = await storage.customProviders.getAll();
+	for (const customProvider of customProviders) {
+		const model = customProvider.models?.[0];
+		if (model) {
+			agent.setModel(model);
+			await storage.settings.set("lastUsedModel", model);
+			await updateAuthLabel();
+			renderApp();
+			return;
+		}
+	}
 }
 
 async function getProvidersWithKeys(): Promise<string[]> {
@@ -181,7 +276,14 @@ async function hasAnyApiKey(): Promise<boolean> {
 function openApiKeysDialog(): Promise<void> {
 	return new Promise((resolve) => {
 		SettingsDialog.open(
-			[new ApiKeysOAuthTab(), new CostsTab(), new SkillsTab(), new ProxyTab(), new AboutTab()],
+			[
+				new ApiKeysOAuthTab(),
+				new CustomProvidersTab(),
+				new CostsTab(),
+				new SkillsTab(),
+				new ProxyTab(),
+				new AboutTab(),
+			],
 			resolve,
 		);
 	});
@@ -479,6 +581,15 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 					renderApp();
 				},
 				providers,
+				{
+					level: agent.state.thinkingLevel,
+					onChange: (level) => {
+						agent.setThinkingLevel(level);
+						chatPanel.agentInterface?.requestUpdate();
+						saveSession();
+						renderApp();
+					},
+				},
 			);
 		},
 		onBeforeSend: async () => {
@@ -568,6 +679,13 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 	// Register custom message renderers after agentInterface is available
 	if (chatPanel.agentInterface) {
 		registerWelcomeRenderer(agent, chatPanel.agentInterface);
+
+		// Thinking level now lives inside the model picker, not as a separate
+		// dropdown in the input toolbar.
+		chatPanel.agentInterface.enableThinkingSelector = false;
+		// "/" in the chat input lists skills (recordings included) for the site.
+		chatPanel.agentInterface.slashCommandProvider = buildSkillSlashProvider();
+		chatPanel.agentInterface.requestUpdate();
 
 		// Only disable auto-scroll for new sessions with welcome message
 		// Check if this is a fresh session (only has welcome message, no user messages)
@@ -695,6 +813,21 @@ const renderApp = () => {
 				</div>
 				<div class="flex items-center gap-1 px-2">
 					${agent ? html`<span class="text-[10px] text-muted-foreground truncate max-w-[120px]" title="${agent.state.model.provider}/${agent.state.model.id}${authLabel ? ` (${authLabel})` : ""}">${agent.state.model.provider}${authLabel ? html` <span class="text-[9px] opacity-70">${authLabel}</span>` : ""}</span>` : ""}
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						children: icon(isRecording ? Square : Circle, "sm"),
+						className: isRecording ? "text-red-500 animate-pulse" : "",
+						onClick: toggleRecording,
+						title: isRecording ? "Stop recording and save as skill" : "Record actions on this page as a skill",
+					})}
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						children: icon(Download, "sm"),
+						onClick: downloadCurrentChat,
+						title: "Download chat (Markdown)",
+					})}
 					<theme-toggle></theme-toggle>
 					${Button({
 						variant: "ghost",
@@ -703,6 +836,7 @@ const renderApp = () => {
 						onClick: () =>
 							SettingsDialog.open([
 								new ApiKeysOAuthTab(),
+								new CustomProvidersTab(),
 								new CostsTab(),
 								new SkillsTab(),
 								new ProxyTab(),
@@ -918,6 +1052,10 @@ async function initApp() {
 	const stored = await chrome.storage.local.get("showJsonMode");
 	const showJsonModeEnabled = (stored.showJsonMode as boolean) || false;
 	setShowJsonMode(showJsonModeEnabled);
+
+	// Reconcile CORS rules for any configured custom providers (dynamic DNR rules
+	// don't ship in the static manifest, so make sure they exist after a reload).
+	syncCustomProviderCorsRules().catch((err) => console.error("Failed to sync custom provider CORS rules:", err));
 
 	// Get current window ID for filtering tab events
 	const currentWindow = await chrome.windows.getCurrent();
