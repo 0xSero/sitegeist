@@ -25,6 +25,7 @@ import { html, render } from "lit";
 import { Circle, Download, History, Link, Plus, Settings, Square } from "lucide";
 import { isRestrictedUrl } from "./browser/cdp.js";
 import { setCurrentBrowserSession } from "./browser/current.js";
+import { dispatchToSandbox, setCdpMessageHandler } from "./browser/inject.js";
 import { BrowserSession, listSessions } from "./browser/session.js";
 import { Toast } from "./components/Toast.js";
 import { AboutTab } from "./dialogs/AboutTab.js";
@@ -38,7 +39,6 @@ import { SessionCostDialog } from "./dialogs/SessionCostDialog.js";
 import { SitegeistSessionListDialog } from "./dialogs/SessionListDialog.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
 import { UpdateNotificationDialog } from "./dialogs/UpdateNotificationDialog.js";
-import { UserScriptsPermissionDialog } from "./dialogs/UserScriptsPermissionDialog.js";
 import { WelcomeSetupDialog } from "./dialogs/WelcomeSetupDialog.js";
 import { browserMessageTransformer } from "./messages/message-transformer.js";
 import {
@@ -86,6 +86,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 		}
 		return true; // Keep channel open for async response
 	}
+});
+
+// Messages from code injected through the debugger path (no userScripts API) arrive
+// here instead of chrome.runtime.onMessage; route them exactly the same way.
+setCdpMessageHandler(async (message) => {
+	if (message.type === "abort-repl") {
+		if (agent?.state.isStreaming) {
+			agent.abort();
+			return { success: true };
+		}
+		return { success: false, reason: "not-streaming" };
+	}
+	return dispatchToSandbox(message);
 });
 
 // ============================================================================
@@ -1119,10 +1132,8 @@ async function initApp() {
 	// 	await PersistentStorageDialog.request();
 	// }
 
-	// Request userScripts permission if not available
-	if (!chrome.userScripts) {
-		await UserScriptsPermissionDialog.request();
-	}
+	// In-page scripts use the userScripts API when the browser exposes it and fall back
+	// to an isolated content-script world otherwise, so no permission prompt is needed.
 
 	// TODO: re-enable update check when publishing to users
 	// await checkForUpdates();

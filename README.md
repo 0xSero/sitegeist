@@ -28,10 +28,13 @@ This fork (0xSero/sitegeist) adds three things to upstream (badlogic/sitegeist):
 1. Download or build (`npm run build`) the unpacked extension in `dist-chrome/`.
 2. Open `chrome://extensions` (or `brave://extensions`), enable Developer mode, click
    Load unpacked, select `dist-chrome/`.
-3. Open the side panel with `Cmd+Shift+S` / `Ctrl+Shift+S`. It asks once for the
-   JavaScript execution permission (the `userScripts` API); click Grant. No extensions-page
-   toggle is needed on Chrome 138+. Optionally enable **Allow access to file URLs**.
-4. Connect a provider.
+3. Open the side panel with `Cmd+Shift+S` / `Ctrl+Shift+S` and connect a provider.
+
+No toggles are required. In-page JavaScript runs through the `userScripts` API when the
+browser exposes it (an isolated world whose CSP blocks network access from injected code)
+and through the debugger's `Runtime.evaluate` otherwise (the page's main world; Chrome
+shows its "is debugging this browser" bar). If you want the stricter sandbox, enable
+**Allow user scripts** in the extension's details; everything works either way.
 
 Requires Chrome 141+ or the equivalent Chromium release.
 
@@ -139,6 +142,33 @@ Start all dev watchers (mini-lit, pi-mono, sitegeist extension, marketing site):
 
 ```bash
 ./dev.sh
+```
+
+This fork needs one addition in `../pi-mono/packages/ai/src/models.ts` that upstream pi-ai
+does not have yet (runtime model discovery registers into its model registry):
+
+```ts
+export function registerModels(provider: string, models: Model<Api>[]): void {
+	const providerModels = new Map<string, Model<Api>>();
+	for (const model of models) providerModels.set(model.id, model);
+	modelRegistry.set(provider, providerModels);
+}
+
+export function resetProviderModels(provider: string): void {
+	const generated = (MODELS as Record<string, Record<string, Model<Api>>>)[provider];
+	if (!generated) {
+		modelRegistry.delete(provider);
+		return;
+	}
+	const providerModels = new Map<string, Model<Api>>();
+	for (const [id, model] of Object.entries(generated)) providerModels.set(id, model);
+	modelRegistry.set(provider, providerModels);
+}
+
+export function getGeneratedModels(provider: string): Model<Api>[] {
+	const generated = (MODELS as Record<string, Record<string, Model<Api>>>)[provider];
+	return generated ? Object.values(generated) : [];
+}
 ```
 
 Without the watchers, build the sibling declarations once so type checking resolves:

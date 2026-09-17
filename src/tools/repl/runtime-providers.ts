@@ -1,13 +1,14 @@
 import { ConsoleRuntimeProvider, RUNTIME_MESSAGE_ROUTER, type SandboxRuntimeProvider } from "@mariozechner/pi-web-ui";
 import { isRestrictedUrl } from "../../browser/cdp.js";
 import { getCurrentBrowserSession } from "../../browser/current.js";
+import { hasUserScripts, injectScript, terminateInjection, unregisterSandboxProviders } from "../../browser/inject.js";
 import {
 	BROWSERJS_RUNTIME_PROVIDER_DESCRIPTION,
 	NAVIGATE_RUNTIME_PROVIDER_DESCRIPTION,
 } from "../../prompts/prompts.js";
 import { getSitegeistStorage } from "../../storage/app-storage.js";
 import type { NavigateParams, NavigateTool } from "../navigate.js";
-import { buildWrapperCode, checkUserScriptsAvailability } from "./userscripts-helpers.js";
+import { buildWrapperCode } from "./userscripts-helpers.js";
 
 /**
  * BrowserJsRuntimeProvider
@@ -106,16 +107,6 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 		const replSandboxId = message.sandboxId;
 		const abortSignal = replSandboxId ? this.sandboxAbortSignals.get(replSandboxId) : undefined;
 
-		// Check if userScripts API is available
-		const apiCheck = await checkUserScriptsAvailability();
-		if (!apiCheck.available) {
-			respond({
-				success: false,
-				error: apiCheck.message || "userScripts API not available",
-			});
-			return;
-		}
-
 		// The session's current tab (created on about:blank if the session has none)
 		let tab: chrome.tabs.Tab;
 		try {
@@ -185,9 +176,10 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 		// Use fixed worldId for all executions
 		const FIXED_WORLD_ID = "sitegeist-browser-script";
 
-		// Check if terminate API is available (Chrome 138+)
-		// @ts-expect-error - terminate is not yet in the type definitions
-		const supportsTerminate = typeof chrome.userScripts?.terminate === "function";
+		// Cancellation: userScripts.terminate (Chrome 138+) or Runtime.terminateExecution on the debugger path
+		const supportsTerminate =
+			!hasUserScripts() ||
+			typeof (chrome as { userScripts?: { terminate?: unknown } }).userScripts?.terminate === "function";
 
 		// Generate execution ID for cancellation support (only if terminate is available)
 		const executionId = supportsTerminate ? crypto.randomUUID() : undefined;
@@ -206,8 +198,7 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 			? async () => {
 					console.log(`[BrowserJsRuntimeProvider] Aborting execution ${executionId}`);
 					try {
-						// @ts-expect-error - terminate is not yet in the type definitions
-						await chrome.userScripts.terminate(tab.id!, executionId);
+						await terminateInjection(tab.id!, executionId);
 						console.log(`[BrowserJsRuntimeProvider] Successfully terminated execution ${executionId}`);
 					} catch (e) {
 						console.error(`[BrowserJsRuntimeProvider] Failed to terminate execution:`, e);
@@ -220,42 +211,21 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 		}
 
 		try {
-			// Execute via userScripts API
-			if (chrome.userScripts && typeof chrome.userScripts.execute === "function") {
-				// Configure the fixed world with CSP
-				try {
-					await chrome.userScripts.configureWorld({
-						worldId: FIXED_WORLD_ID,
-						messaging: true,
-						csp: "script-src 'unsafe-eval' 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src 'none'; frame-src 'none'; font-src 'none'; object-src 'none'; default-src 'none';",
-					});
-				} catch (e) {
-					console.warn("[BrowserJsRuntimeProvider] Failed to configure userScripts world:", e);
-				}
-
-				const injectionConfig: any = {
-					js: [{ code: wrapperCode }],
-					target: { tabId: tab.id, allFrames: false },
-					world: "USER_SCRIPT",
-					worldId: FIXED_WORLD_ID,
-					injectImmediately: true,
-				};
-
-				// Only add executionId if terminate API is available
-				if (executionId) {
-					injectionConfig.executionId = executionId;
-				}
-
-				const results = await chrome.userScripts.execute(injectionConfig);
-
-				const result = results[0]?.result as
+			// userScripts world when the browser exposes it (sandboxed CSP), else an isolated content-script world
+			{
+				const result = await injectScript<
 					| {
 							success: boolean;
 							lastValue?: unknown;
 							error?: string;
 							stack?: string;
 					  }
-					| undefined;
+					| undefined
+				>(tab.id, wrapperCode, {
+					worldId: FIXED_WORLD_ID,
+					csp: "script-src 'unsafe-eval' 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src 'none'; frame-src 'none'; font-src 'none'; object-src 'none'; default-src 'none';",
+					executionId,
+				});
 
 				// Get console output from the dedicated ConsoleRuntimeProvider for this execution
 				const consoleLogs = pageConsoleProvider.getLogs();
@@ -283,12 +253,6 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 					success: true,
 					result: result.lastValue,
 					console: consoleLogs,
-				});
-			} else {
-				// Firefox fallback
-				respond({
-					success: false,
-					error: 'Firefox is currently not supported for browserjs(). Use Chrome 138+ with "Allow User Scripts" enabled.',
 				});
 			}
 		} catch (error: any) {
@@ -328,6 +292,7 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 	private cleanup(sandboxId: string) {
 		if (this.activeSandboxIds.has(sandboxId)) {
 			RUNTIME_MESSAGE_ROUTER.unregisterSandbox(sandboxId);
+			unregisterSandboxProviders(sandboxId);
 			this.activeSandboxIds.delete(sandboxId);
 		}
 	}

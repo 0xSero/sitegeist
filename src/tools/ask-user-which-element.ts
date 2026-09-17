@@ -13,6 +13,7 @@ import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Loader2, MousePointer2 } from "lucide";
 import { getCurrentBrowserSession } from "../browser/current.js";
+import { injectScript } from "../browser/inject.js";
 import { ASK_USER_WHICH_ELEMENT_TOOL_DESCRIPTION } from "../prompts/prompts.js";
 import "../utils/i18n-extension.js";
 
@@ -560,54 +561,33 @@ export class AskUserWhichElementTool implements AgentTool<typeof selectElementSc
 			// Build the script code - just call the async function and return result
 			const scriptCode = `(${createElementPickerOverlay.toString()})(${JSON.stringify(args.message || "")})`;
 
-			let results: any[];
-
 			try {
-				// Inject using userScripts.execute (USER_SCRIPT world)
-				if (chrome.userScripts && typeof chrome.userScripts.execute === "function") {
-					// Execute the script and get result
-					const executePromise = chrome.userScripts.execute({
-						target: { tabId: tab.id, allFrames: false },
-						world: "USER_SCRIPT",
-						injectImmediately: true,
-						js: [{ code: scriptCode }],
-					});
+				const tabId = tab.id;
+				const executePromise = injectScript<ElementInfo | null | undefined>(tabId, scriptCode, {
+					worldId: "sitegeist-element-picker",
+				});
 
-					// Race execution against abort signal
-					if (signal) {
-						const abortPromise = new Promise<never>((_, reject) => {
-							if (signal.aborted) {
-								reject(new Error("Aborted"));
-							} else {
-								signal.addEventListener("abort", () => {
-									// Try to cleanup overlay when aborted
-									const cleanupCode = `window.dispatchEvent(new CustomEvent("sitegeist-element-cancel"));`;
-									chrome.userScripts
-										?.execute({
-											target: { tabId: tab.id!, allFrames: false },
-											world: "USER_SCRIPT",
-											injectImmediately: true,
-											js: [{ code: cleanupCode }],
-										})
-										.catch(() => {
-											// Ignore errors
-										});
-									reject(new Error("Aborted"));
+				let result: ElementInfo | null | undefined;
+				// Race execution against abort signal
+				if (signal) {
+					const abortPromise = new Promise<never>((_, reject) => {
+						if (signal.aborted) {
+							reject(new Error("Aborted"));
+						} else {
+							signal.addEventListener("abort", () => {
+								// Try to cleanup overlay when aborted
+								const cleanupCode = `window.dispatchEvent(new CustomEvent("sitegeist-element-cancel"));`;
+								injectScript(tabId, cleanupCode, { worldId: "sitegeist-element-picker" }).catch(() => {
+									// Ignore errors
 								});
-							}
-						});
-						results = await Promise.race([executePromise, abortPromise]);
-					} else {
-						results = await executePromise;
-					}
+								reject(new Error("Aborted"));
+							});
+						}
+					});
+					result = await Promise.race([executePromise, abortPromise]);
 				} else {
-					throw new Error(
-						"userScripts.execute() not available. This tool requires Chrome 138+ with User Scripts enabled.",
-					);
+					result = await executePromise;
 				}
-
-				// Extract the result from the execution
-				const result = results[0]?.result as ElementInfo | null | undefined;
 
 				if (!result) {
 					throw new Error("Element selection was cancelled");

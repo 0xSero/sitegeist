@@ -18,6 +18,7 @@ import {
 	readNetwork,
 	typeText,
 } from "../browser/cdp.js";
+import { injectScript } from "../browser/inject.js";
 import {
 	fillElement,
 	goBack,
@@ -294,8 +295,8 @@ export const handlers: Record<string, Handler> = {
 			const tabId = await resolveTab(ctx, params, true);
 			return { value: await evaluateMain(tabId, code) };
 		}
-		const tabId = await resolveTab(ctx, params, false);
-		return { value: await runInPage(tabId, code) };
+		const tabId = await resolveTab(ctx, params, true);
+		return { value: await injectScript(tabId, code) };
 	},
 
 	wait: async (ctx, params) => {

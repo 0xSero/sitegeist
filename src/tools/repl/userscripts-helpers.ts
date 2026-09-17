@@ -1,5 +1,8 @@
 import type { SandboxRuntimeProvider } from "@mariozechner/pi-web-ui";
 import { RUNTIME_MESSAGE_ROUTER, RuntimeMessageBridge } from "@mariozechner/pi-web-ui";
+import { registerSandboxProviders } from "../../browser/inject.js";
+
+const USERSCRIPTS_RELOAD_FLAG = "userscripts_reload_attempted";
 
 export interface UserScriptsCheckResult {
 	available: boolean;
@@ -65,9 +68,24 @@ export async function requestUserScriptsPermission(): Promise<{
 		try {
 			const granted = await chrome.permissions.request({ permissions: ["userScripts"] });
 			if (granted) {
-				// The API namespace appears in freshly created contexts; reload this page.
-				setTimeout(() => window.location.reload(), 300);
-				return { granted: true, message: "Permission granted. Reloading..." };
+				if (chrome.userScripts) return { granted: true };
+				// Granted, but the namespace only shows up after the extension itself restarts.
+				// Reload the extension once; if the API is still missing afterwards, the
+				// browser gates it behind the toggle and we say so instead of looping.
+				const flag = await chrome.storage.local.get(USERSCRIPTS_RELOAD_FLAG);
+				if (!flag[USERSCRIPTS_RELOAD_FLAG]) {
+					await chrome.storage.local.set({ [USERSCRIPTS_RELOAD_FLAG]: true });
+					setTimeout(() => chrome.runtime.reload(), 300);
+					return {
+						granted: true,
+						message: "Permission granted. Restarting the extension; reopen the side panel.",
+					};
+				}
+				return {
+					granted: false,
+					message:
+						"The permission is granted but this browser still hides the userScripts API. Enable it manually: chrome://extensions/ > this extension > Details > 'Allow User Scripts', then reload the side panel.",
+				};
 			}
 			return {
 				granted: false,
@@ -113,6 +131,7 @@ export async function requestUserScriptsPermission(): Promise<{
  */
 export async function checkUserScriptsAvailability(): Promise<UserScriptsCheckResult> {
 	if (chrome.userScripts) {
+		chrome.storage.local.remove(USERSCRIPTS_RELOAD_FLAG).catch(() => undefined);
 		return { available: true };
 	}
 
@@ -280,8 +299,10 @@ export function buildWrapperCode(
 
 	let providerInjections = `${bridgeCode}\n`;
 
-	// Register sandbox with RUNTIME_MESSAGE_ROUTER
+	// Register sandbox with RUNTIME_MESSAGE_ROUTER (userScripts path) and with the
+	// debugger-path registry; the same providers serve both.
 	RUNTIME_MESSAGE_ROUTER.registerSandbox(sandboxId, providers, []);
+	registerSandboxProviders(sandboxId, providers);
 
 	// Inject data from providers (e.g., window.artifacts = {...})
 	for (const provider of providers) {

@@ -7,6 +7,7 @@
  * backoff and on a 30 s alarm, which also keeps the worker alive.
  */
 
+import { setCdpMessageHandler } from "../browser/inject.js";
 import { BrowserSession, listSessions } from "../browser/session.js";
 import {
 	addPendingRequest,
@@ -260,13 +261,15 @@ function onHostMessage(message: HostToExt): void {
 				return;
 			}
 			if (message.method === "bridge.debug") {
-				listSessions().then((sessions) =>
+				Promise.all([listSessions(), chrome.permissions.getAll()]).then(([sessions, perms]) =>
 					send({
 						type: "response",
 						clientId: message.clientId,
 						id: message.id,
 						result: {
 							version: chrome.runtime.getManifest().version,
+							userScriptsApi: typeof (chrome as { userScripts?: unknown }).userScripts !== "undefined",
+							grantedPermissions: perms.permissions ?? [],
 							workerUptimeS: Math.round((Date.now() - WORKER_STARTED_AT) / 1000),
 							log: [...log],
 							clients: [...clients.values()].map((c) => ({
@@ -387,6 +390,8 @@ function connect(): void {
 
 /** Wire the bridge into the service worker. Safe to call on every worker start. */
 export function startBridge(): void {
+	// Injected code has no runtime providers in the worker; echo so callers can probe the shim.
+	setCdpMessageHandler(async (message) => ({ echo: message }));
 	chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
 	chrome.alarms.onAlarm.addListener((alarm) => {
 		if (alarm.name === ALARM_NAME) {

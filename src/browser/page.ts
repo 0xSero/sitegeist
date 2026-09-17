@@ -120,30 +120,15 @@ export async function runInPage<T = unknown>(tabId: number, code: string, worldI
 		throw new Error(`Cannot run scripts on ${tab.url}: browser-internal pages are protected.`);
 	}
 	const wrapped = `(async () => { try { const __v = await (${code}); return { ok: true, value: __v }; } catch (e) { return { ok: false, error: String(e && e.stack || e) }; } })()`;
-	// userScripts needs the "Allow user scripts" toggle; without it, use an isolated
-	// content-script world, and as a last resort the debugger's main-world evaluate.
+	// userScripts needs the "Allow user scripts" toggle; without it, evaluate through the
+	// debugger in the main world (CSP does not apply to Runtime.evaluate).
 	let api: UserScriptsApi | undefined;
 	try {
 		api = userScripts();
 	} catch {
 		api = undefined;
 	}
-	if (!api) {
-		try {
-			const [res] = await chrome.scripting.executeScript({
-				target: { tabId },
-				world: "ISOLATED",
-				// biome-ignore lint/security/noGlobalEval: the code is our own snippet, run in an isolated world when userScripts is unavailable
-				func: (src: string) => globalThis.eval(src) as unknown,
-				args: [wrapped],
-			});
-			return unwrap<T>(res?.result);
-		} catch (err) {
-			console.debug("[page] scripting fallback failed, using debugger:", err);
-			const result = await cdpEvaluate<T>(tabId, wrapped);
-			return result;
-		}
-	}
+	if (!api) return cdpEvaluate<T>(tabId, wrapped);
 	if (!configuredWorlds.has(worldId)) {
 		try {
 			await api.configureWorld({ worldId, messaging: true, csp: SNAPSHOT_CSP });

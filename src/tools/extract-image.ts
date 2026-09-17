@@ -6,6 +6,7 @@ import { html } from "lit";
 import { Image as ImageIcon } from "lucide";
 import { captureScreenshot } from "../browser/cdp.js";
 import { getCurrentBrowserSession } from "../browser/current.js";
+import { injectScript } from "../browser/inject.js";
 
 const EXTRACT_IMAGE_DESCRIPTION = `Extract images from the current page. Returns image data that you can see and analyze.
 
@@ -78,27 +79,12 @@ async function getImageInfoFromPage(
 		return { success: false, error: 'Element <' + el.tagName.toLowerCase() + '> is not an image, canvas, or element with background-image' };
 	})()`;
 
-	try {
-		await chrome.userScripts.configureWorld({
-			worldId: "sitegeist-extract-image",
-			messaging: true,
-		});
-	} catch {
-		// Already configured
-	}
-
-	const results = await chrome.userScripts.execute({
-		js: [{ code }],
-		target: { tabId, allFrames: false },
-		world: "USER_SCRIPT",
-		worldId: "sitegeist-extract-image",
-		injectImmediately: true,
-	} as any);
-
-	const result = (results as any)?.[0]?.result;
+	const result = await injectScript<
+		{ success: boolean; error?: string; src?: string; width?: number; height?: number } | undefined
+	>(tabId, code, { worldId: "sitegeist-extract-image" });
 	if (!result) return "Failed to execute script in page";
-	if (!result.success) return result.error;
-	return { src: result.src, width: result.width || 0, height: result.height || 0 };
+	if (!result.success) return result.error ?? "Failed to read image";
+	return { src: result.src ?? "", width: result.width || 0, height: result.height || 0 };
 }
 
 /**

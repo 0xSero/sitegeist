@@ -1,4 +1,5 @@
 import { getCurrentBrowserSession, hasCurrentBrowserSession } from "../../browser/current.js";
+import { injectScript } from "../../browser/inject.js";
 import { createOverlayScript, removeOverlayScript } from "./overlay-content.js";
 
 const OVERLAY_WORLD_ID = "sitegeist-repl-overlay";
@@ -36,32 +37,11 @@ export async function injectOverlay(tabId: number, taskName: string): Promise<vo
 			return;
 		}
 
-		// Use userScripts API with messaging enabled
-		if (chrome.userScripts && typeof chrome.userScripts.execute === "function") {
-			// Configure world with messaging enabled
-			try {
-				await chrome.userScripts.configureWorld({
-					worldId: OVERLAY_WORLD_ID,
-					messaging: true,
-					csp: "script-src 'unsafe-eval' 'unsafe-inline'; style-src 'unsafe-inline'; default-src 'none';",
-				});
-			} catch (e) {
-				console.warn("[Overlay] Failed to configure userScripts world:", e);
-			}
-
-			// Inject overlay script
-			await chrome.userScripts.execute({
-				js: [{ code: createOverlayScript(taskName) }],
-				target: { tabId, allFrames: false },
-				world: "USER_SCRIPT",
-				worldId: OVERLAY_WORLD_ID,
-				injectImmediately: true,
-			});
-
-			console.log("[Overlay] Injected overlay into tab", tabId);
-		} else {
-			console.warn("[Overlay] userScripts API not available");
-		}
+		await injectScript(tabId, createOverlayScript(taskName), {
+			worldId: OVERLAY_WORLD_ID,
+			csp: "script-src 'unsafe-eval' 'unsafe-inline'; style-src 'unsafe-inline'; default-src 'none';",
+		});
+		console.log("[Overlay] Injected overlay into tab", tabId);
 	} catch (error) {
 		// Don't fail the REPL if overlay injection fails
 		console.warn("[Overlay] Failed to inject overlay:", error);
@@ -74,17 +54,8 @@ export async function injectOverlay(tabId: number, taskName: string): Promise<vo
  */
 export async function removeOverlay(tabId: number): Promise<void> {
 	try {
-		if (chrome.userScripts && typeof chrome.userScripts.execute === "function") {
-			await chrome.userScripts.execute({
-				js: [{ code: removeOverlayScript() }],
-				target: { tabId, allFrames: false },
-				world: "USER_SCRIPT",
-				worldId: OVERLAY_WORLD_ID,
-				injectImmediately: true,
-			});
-
-			console.log("[Overlay] Removed overlay from tab", tabId);
-		}
+		await injectScript(tabId, removeOverlayScript(), { worldId: OVERLAY_WORLD_ID });
+		console.log("[Overlay] Removed overlay from tab", tabId);
 	} catch (error) {
 		// Don't fail the REPL if overlay removal fails (tab might be closed)
 		console.warn("[Overlay] Failed to remove overlay:", error);
