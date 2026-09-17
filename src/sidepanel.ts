@@ -154,13 +154,15 @@ function sessionLabel(): string {
 }
 
 async function openBrowserSession(id: string): Promise<void> {
-	// Any other panel session left in this window gives its tabs back (ungrouped, still open).
-	await releaseOtherPanelSessions(currentWindowId, id);
 	browserSession = await BrowserSession.open(id, sessionLabel(), currentWindowId);
 	setCurrentBrowserSession(browserSession);
-	// The tab the panel was opened on becomes the session's first tab, so the tab group
-	// exists from the start and the agent has a page to work with.
-	if (browserSession.tabIds.length === 0) await adoptActiveTab(false);
+	// Adopt the tab the panel was opened on BEFORE releasing any other session: the very
+	// first session-table write must already mark this tab owned, or the worker's sync can
+	// disable it (Chrome hides the panel when its active tab is disabled) and close the panel.
+	// The group then exists from the start and the agent has a page to work with.
+	await adoptActiveTab(false);
+	// Any other panel session left in this window gives its tabs back (ungrouped, still open).
+	await releaseOtherPanelSessions(currentWindowId, id);
 	renderApp();
 }
 

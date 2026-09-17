@@ -13,7 +13,7 @@
 - `navigate` gained `showTab` and `closeTab`; `switchToTab` no longer focuses the tab.
 - Composer: ArrowUp in an empty composer recalls the last prompt; the model picker is a plain model-id button and the send button is an arrow (pi-web-ui `MessageEditor`/`AgentInterface`, see README). The provider/auth label was removed from the header.
 - Browser sessions persist in `chrome.storage.local` (they and their groups survive extension reloads), grouping retries when Chromium refuses a tab edit, and the panel adopts the tab it opens on even when that is a New Tab page.
-- The side panel follows its tab group: it is available only on the tabs its session owns, hides when another tab in the window is active, and reappears on an owned tab. Opening it from the icon or shortcut on any tab adopts that tab. While the agent is mid-run the panel stays available on every tab of the window (Chrome destroys a hidden panel document, which would abort the run); it is confined again once idle.
+- The side panel follows its tab group: available on the tabs its session owns, hidden when the user switches to a foreign tab, shown again on an owned tab. Hiding touches only the tab the user just activated (never the tab the panel is on), and a just-opened tab is protected until the session adopts it, so opening a panel or starting a new chat can no longer close it. Opening from the icon or shortcut on any tab adopts that tab. While the agent is mid-run the panel stays available on every tab of the window (Chrome destroys a hidden panel document, which would abort the run); it is confined again once idle.
 - Removed upstream working notes from the repository root (`db.md`, `gmail.md`, `plan.md`).
 
 ### Fixed

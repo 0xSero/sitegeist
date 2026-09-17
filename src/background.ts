@@ -58,6 +58,23 @@ async function ownedTabsForWindow(windowId: number): Promise<Set<number> | null>
 }
 
 const PANEL_PATH = "sidepanel.html";
+// Tabs the panel was just opened on: never disabled until they are genuinely owned,
+// so a sync racing ahead of adoption cannot hide (and thereby close) a fresh panel.
+const protectedTabs = new Map<number, number>();
+const PROTECT_MS = 15000;
+
+function protectTab(tabId: number): void {
+	protectedTabs.set(tabId, Date.now() + PROTECT_MS);
+}
+function isProtected(tabId: number): boolean {
+	const until = protectedTabs.get(tabId);
+	if (until === undefined) return false;
+	if (Date.now() > until) {
+		protectedTabs.delete(tabId);
+		return false;
+	}
+	return true;
+}
 
 async function setPanelEnabled(tabId: number, enabled: boolean): Promise<void> {
 	if (panelEnabledCache.get(tabId) === enabled) return;
@@ -75,56 +92,87 @@ async function setPanelEnabled(tabId: number, enabled: boolean): Promise<void> {
 function recordPanelError(where: string, err: unknown): void {
 	const message = `${where}: ${err instanceof Error ? err.message : String(err)}`;
 	console.warn("[Background]", message);
+	panelLog(`ERROR ${message}`);
 	chrome.storage.session
 		.set({ sidepanel_last_error: `${new Date().toISOString()} ${message}` })
 		.catch(() => undefined);
 }
 
-async function syncPanelForWindow(windowId: number): Promise<void> {
-	const tabs = await chrome.tabs.query({ windowId }).catch(() => []);
-	// Chrome tears the panel document down while it is hidden on a foreign tab and
-	// recreates it on an owned one, so "no port" does not mean "closed by the user".
-	// The per-tab state therefore follows the session's tabs alone; opening the panel
-	// explicitly (icon or shortcut) re-enables the tab it is opened on.
-	// Hiding the panel destroys its document, which would abort a running agent. While
-	// the agent works the panel stays available everywhere in the window; once it is idle
-	// the panel is confined to its own tabs again.
-	const owned = (await panelBusy(windowId)) ? null : await ownedTabsForWindow(windowId);
-	panelLog(`sync window=${windowId} owned=${owned ? [...owned].join(",") : "all"} tabs=${tabs.length}`);
-	for (const tab of tabs) {
-		if (tab.id === undefined) continue;
-		await setPanelEnabled(tab.id, owned === null ? true : owned.has(tab.id));
-	}
+/**
+ * Enable the side panel on the tabs the current session owns in a window. This only ever
+ * ENABLES tabs; it never disables, so it cannot close a panel. Hiding is handled solely by
+ * {@link hideForForeignTab} when the user switches to a tab the session does not own.
+ */
+async function enableOwnedTabs(windowId: number): Promise<void> {
+	const owned = await ownedTabsForWindow(windowId);
+	if (!owned) return;
+	for (const tabId of owned) await setPanelEnabled(tabId, true);
 }
 
 /**
- * Make the panel available on a tab the user is deliberately opening it on. Not awaited
- * by callers: sidePanel.open must run in the same tick as the user gesture, and Chrome
- * applies the two calls in order.
+ * When the user switches tabs, hide the panel if the newly active tab is foreign, or show
+ * it if the tab is owned. This is the only place a tab is ever disabled — Chrome hides the
+ * panel exactly when the active tab has `enabled:false`. Skipped while the agent is mid-run
+ * (hiding destroys the panel document and would abort the run) and for protected tabs.
+ */
+async function reconcileActiveTab(windowId: number, tabId: number): Promise<void> {
+	if (!openSidepanels.has(windowId)) return; // no panel open in this window; leave tabs alone
+	const owned = await ownedTabsForWindow(windowId);
+	if (owned === null) return; // session owns nothing yet; nothing to confine to
+	if (owned.has(tabId)) {
+		await setPanelEnabled(tabId, true);
+		return;
+	}
+	if (isProtected(tabId)) return;
+	if (await panelBusy(windowId)) return; // keep visible everywhere while working
+	await setPanelEnabled(tabId, false);
+}
+
+/**
+ * Make the panel available on a tab the user is deliberately opening it on. Not awaited by
+ * callers: sidePanel.open must run in the same tick as the user gesture, and Chrome applies
+ * the two calls in order.
  */
 function enablePanelForTab(tabId: number): void {
 	panelLog(`enable+open tab=${tabId}`);
+	protectTab(tabId);
 	panelEnabledCache.set(tabId, true);
 	chrome.sidePanel
 		.setOptions({ tabId, path: PANEL_PATH, enabled: true })
 		.catch((err) => recordPanelError("setOptions", err));
 }
 
-async function syncAllPanels(): Promise<void> {
+chrome.tabs.onActivated.addListener((info) => void reconcileActiveTab(info.windowId, info.tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+	panelEnabledCache.delete(tabId);
+	protectedTabs.delete(tabId);
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+	// A session gained tabs (adoption, navigation): make sure those tabs are enabled, and
+	// re-check the active tab of each window in case it just became owned or foreign.
+	if (area === "local" && "browser_sessions" in changes) void onSessionsChanged();
+	if (area === "session" && Object.keys(changes).some((k) => k.startsWith(PANEL_BUSY_PREFIX))) void onBusyChanged();
+});
+
+async function onSessionsChanged(): Promise<void> {
 	const windows = await chrome.windows.getAll({ windowTypes: ["normal"] }).catch(() => []);
-	for (const w of windows) if (w.id !== undefined) await syncPanelForWindow(w.id);
+	for (const w of windows) {
+		if (w.id === undefined) continue;
+		await enableOwnedTabs(w.id);
+		const [active] = await chrome.tabs.query({ active: true, windowId: w.id }).catch(() => []);
+		if (active?.id !== undefined) await reconcileActiveTab(w.id, active.id);
+	}
 }
 
-chrome.tabs.onActivated.addListener((info) => {
-	panelLog(`tab activated tab=${info.tabId} window=${info.windowId}`);
-	void syncPanelForWindow(info.windowId);
-});
-chrome.tabs.onCreated.addListener((tab) => void syncPanelForWindow(tab.windowId));
-chrome.tabs.onRemoved.addListener((tabId) => panelEnabledCache.delete(tabId));
-chrome.storage.onChanged.addListener((changes, area) => {
-	if (area === "local" && "browser_sessions" in changes) void syncAllPanels();
-	if (area === "session" && Object.keys(changes).some((k) => k.startsWith(PANEL_BUSY_PREFIX))) void syncAllPanels();
-});
+async function onBusyChanged(): Promise<void> {
+	// When a run ends, confine the panel again by re-checking each window's active tab.
+	const windows = await chrome.windows.getAll({ windowTypes: ["normal"] }).catch(() => []);
+	for (const w of windows) {
+		if (w.id === undefined) continue;
+		const [active] = await chrome.tabs.query({ active: true, windowId: w.id }).catch(() => []);
+		if (active?.id !== undefined) await reconcileActiveTab(w.id, active.id);
+	}
+}
 
 // Called when Sitegeist icon is clicked - opens sidepanel for current tab
 chrome.action.onClicked.addListener((tab: chrome.tabs.Tab) => {
@@ -179,6 +227,13 @@ chrome.runtime.onConnect.addListener((port: chrome.runtime.Port) => {
 
 	// Update cache synchronously
 	openSidepanels.add(windowId);
+
+	// The panel is showing on this window's active tab; protect that tab so no sync can
+	// disable it before the session adopts it, and enable the session's tabs.
+	chrome.tabs.query({ active: true, windowId }).then(([active]) => {
+		if (active?.id !== undefined) protectTab(active.id);
+	});
+	void enableOwnedTabs(windowId);
 
 	// Mark sidepanel as open in persistent storage (survives service worker sleep)
 	chrome.storage.session.get(SIDEPANEL_OPEN_KEY, (data) => {
