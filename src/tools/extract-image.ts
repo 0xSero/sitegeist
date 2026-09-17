@@ -4,12 +4,14 @@ import { registerToolRenderer, renderHeader, type ToolRenderer, type ToolRenderR
 import { type Static, Type } from "@sinclair/typebox";
 import { html } from "lit";
 import { Image as ImageIcon } from "lucide";
+import { captureScreenshot } from "../browser/cdp.js";
+import { getCurrentBrowserSession } from "../browser/current.js";
 
 const EXTRACT_IMAGE_DESCRIPTION = `Extract images from the current page. Returns image data that you can see and analyze.
 
 Modes:
 - selector: Extract an image matching a CSS selector (e.g. "img.hero", "#logo", "img:nth-child(2)")
-- screenshot: Capture the visible area of the current tab`;
+- screenshot: Capture the viewport of the current tab (works while the tab is in the background)`;
 
 const extractImageSchema = Type.Object({
 	mode: Type.Union([Type.Literal("selector"), Type.Literal("screenshot")], {
@@ -138,9 +140,9 @@ async function fetchAndResizeImage(src: string, maxWidth: number): Promise<Image
 	return { type: "image", data: base64, mimeType: "image/png" };
 }
 
-async function captureScreenshot(maxWidth: number, windowId: number): Promise<ImageContent> {
-	const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
-	return fetchAndResizeImage(dataUrl, maxWidth);
+async function captureTabScreenshot(maxWidth: number, tabId: number): Promise<ImageContent> {
+	const shot = await captureScreenshot(tabId, { maxWidth });
+	return { type: "image", data: shot.data, mimeType: shot.mimeType };
 }
 
 export class ExtractImageTool implements AgentTool<typeof extractImageSchema, ExtractImageDetails> {
@@ -148,7 +150,6 @@ export class ExtractImageTool implements AgentTool<typeof extractImageSchema, Ex
 	label = "Extract Image";
 	description = EXTRACT_IMAGE_DESCRIPTION;
 	parameters = extractImageSchema;
-	windowId?: number;
 
 	async execute(
 		_toolCallId: string,
@@ -160,14 +161,14 @@ export class ExtractImageTool implements AgentTool<typeof extractImageSchema, Ex
 		const details: ExtractImageDetails = { mode: args.mode, selector: args.selector };
 
 		if (args.mode === "screenshot") {
-			if (!this.windowId) throw new Error("windowId not set on ExtractImageTool");
-			const image = await captureScreenshot(maxWidth, this.windowId);
+			const tab = await getCurrentBrowserSession().attachedCurrentTab();
+			const image = await captureTabScreenshot(maxWidth, tab.id!);
 			content.push(image);
 			content.push({ type: "text", text: `Screenshot captured (max ${maxWidth}px width)` });
 		} else if (args.mode === "selector") {
 			if (!args.selector) throw new Error("selector is required for 'selector' mode");
-			const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-			if (!tab?.id) throw new Error("No active tab");
+			const tab = await getCurrentBrowserSession().requireCurrentTab();
+			if (!tab.id) throw new Error("No tab available");
 
 			const info = await getImageInfoFromPage(tab.id, args.selector);
 			if (typeof info === "string") throw new Error(info);

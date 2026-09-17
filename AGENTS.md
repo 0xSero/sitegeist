@@ -68,7 +68,10 @@ The site is static HTML (no backend). Source is in `site/src/frontend/`.
 ```
 src/
   sidepanel.ts          # Main entry point, agent setup, settings, rendering
-  background.ts         # Service worker (sidepanel toggle, session locks)
+  background.ts         # Service worker (sidepanel toggle, session locks, bridge, foreground guard)
+  browser/              # Tab sessions (tab group per agent), CDP screenshots/input, page primitives
+  bridge/               # Native-messaging bridge for external harnesses, site permissions
+  models/               # Runtime model discovery per provider
   oauth/                # Browser OAuth flows (Anthropic, OpenAI, GitHub, Gemini)
   dialogs/              # Settings tabs, API key dialogs, welcome setup
   tools/                # Agent tools (navigate, REPL, extract-image, skills, debugger)
@@ -80,4 +83,11 @@ site/
   src/frontend/         # Static landing page and install instructions
 static/
   manifest.chrome.json  # Extension manifest (version lives here)
+cli/
+  src/                  # `sitegeist` CLI: native host, socket client, MCP server, installer, pi extension
 ```
+
+## Bridge development
+- After changing `src/`, rebuild with `npm run build` (or the dev watcher) and run `sitegeist reload` to reload the extension from the terminal.
+- `sitegeist debug` prints the extension's bridge state, request timings, and a Chrome API benchmark.
+- The CLI is a separate package: `cd cli && npm run check`.

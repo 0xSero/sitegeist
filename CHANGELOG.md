@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+- Browser sessions: every chat owns its own tab group and works in the background. Tabs open inactive, tools act on the session's current tab, and the agent never sees the user's other tabs. A "share this tab" button hands the current tab to the agent; `navigate { showTab }` is the only way the agent brings a tab forward.
+- Screenshots and trusted input events go through `chrome.debugger` (works on hidden tabs; focus emulation keeps requestAnimationFrame and lazy loading alive off-screen).
+- Foreground guard: popups opened by agent tabs no longer steal focus.
+- Dynamic model discovery: provider model lists are fetched at runtime (Anthropic, OpenAI, ChatGPT/Codex, Gemini, GitHub Copilot, OpenRouter, Mistral, Groq, xAI, Cerebras, Hugging Face), enriched from the generated table and models.dev, cached in IndexedDB.
+- Bridge for external agents: `cli/` ships the `sitegeist` command (`sitegeist mcp`, `install`, `status`, `allow`, `reload`, `debug`, `pi-extension`). Harnesses reach the browser through a native messaging host and a user-only unix socket; each harness gets its own tab group. Settings > Bridge controls site permissions.
+
+### Changed
+- `navigate` gained `showTab` and `closeTab`; `switchToTab` no longer focuses the tab.
+- Removed upstream working notes from the repository root (`db.md`, `gmail.md`, `plan.md`).
+
+### Fixed
+- Type errors in `CustomProviderEditDialog` (missing i18n keys) and `CustomProvidersTab` (`remove` shadowed `HTMLElement.remove`).
+- Manifest: fixed extension `key` (stable id `bbkgpflnkggdfabgjhofdmdopgjopamc`), new permissions `tabGroups`, `nativeMessaging`, `alarms`.
+
 ## [1.0.0] - 2026-03-15
 
 ### Added

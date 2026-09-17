@@ -1,4 +1,13 @@
+import { startBridge } from "./bridge/native.js";
+import { startForegroundGuard } from "./browser/foreground-guard.js";
 import type { LockedSessionsMessage, LockResultMessage, SidepanelToBackgroundMessage } from "./utils/port.js";
+
+// Keep popups opened by agent-driven background tabs from stealing the user's focus.
+startForegroundGuard();
+
+// External harnesses (omp, pi, Claude Code, Codex) drive the browser through the
+// native-messaging bridge. Connects when the CLI has installed the host manifest.
+startBridge();
 
 // Called when Sitegeist icon is clicked - opens sidepanel for current tab
 chrome.action.onClicked.addListener((tab: chrome.tabs.Tab) => {

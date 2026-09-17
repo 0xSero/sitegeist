@@ -16,6 +16,36 @@ declare module "@mariozechner/mini-lit" {
 		"Loading...": string;
 
 		// Sitegeist extension keys
+		// Custom provider dialog
+		"A custom provider with that name already exists": string;
+		"API Key (optional)": string;
+		"API Type": string;
+		"Add Custom Provider": string;
+		"Add Model": string;
+		"Add at least one model": string;
+		"Base URL": string;
+		"Context window": string;
+		"Defaults to model ID": string;
+		"Display Name (optional)": string;
+		"Edit Custom Provider": string;
+		"Failed to save provider": string;
+		"Leave empty if the endpoint needs no key": string;
+		"Max output tokens": string;
+		"Model ID": string;
+		"Model IDs must be unique": string;
+		Models: string;
+		"OpenAI-compatible base \u2014 usually ends in /v1.": string;
+		"Please enter a base URL": string;
+		"Please enter a provider name": string;
+		"Provider Name": string;
+		"Provider saved": string;
+		Reasoning: string;
+		Remove: string;
+		"Root URL \u2014 the client appends /v1/messages.": string;
+		Save: string;
+		"That name is reserved by a built-in provider. Choose a different name.": string;
+		Vision: string;
+		"e.g. OpenRouter, Together, My Server": string;
 		"Permission request failed": string;
 		"JavaScript Execution Permission Required": string;
 		"This extension needs permission to execute JavaScript code on web pages": string;
@@ -97,6 +127,36 @@ declare module "@mariozechner/mini-lit" {
 
 const sitegeistTranslations = {
 	en: {
+		"A custom provider with that name already exists": "A custom provider with that name already exists",
+		"API Key (optional)": "API Key (optional)",
+		"API Type": "API Type",
+		"Add Custom Provider": "Add Custom Provider",
+		"Add Model": "Add Model",
+		"Add at least one model": "Add at least one model",
+		"Base URL": "Base URL",
+		"Context window": "Context window",
+		"Defaults to model ID": "Defaults to model ID",
+		"Display Name (optional)": "Display Name (optional)",
+		"Edit Custom Provider": "Edit Custom Provider",
+		"Failed to save provider": "Failed to save provider",
+		"Leave empty if the endpoint needs no key": "Leave empty if the endpoint needs no key",
+		"Max output tokens": "Max output tokens",
+		"Model ID": "Model ID",
+		"Model IDs must be unique": "Model IDs must be unique",
+		Models: "Models",
+		"OpenAI-compatible base \u2014 usually ends in /v1.": "OpenAI-compatible base \u2014 usually ends in /v1.",
+		"Please enter a base URL": "Please enter a base URL",
+		"Please enter a provider name": "Please enter a provider name",
+		"Provider Name": "Provider Name",
+		"Provider saved": "Provider saved",
+		Reasoning: "Reasoning",
+		Remove: "Remove",
+		"Root URL \u2014 the client appends /v1/messages.": "Root URL \u2014 the client appends /v1/messages.",
+		Save: "Save",
+		"That name is reserved by a built-in provider. Choose a different name.":
+			"That name is reserved by a built-in provider. Choose a different name.",
+		Vision: "Vision",
+		"e.g. OpenRouter, Together, My Server": "e.g. OpenRouter, Together, My Server",
 		"Permission request failed": "Permission request failed",
 		"JavaScript Execution Permission Required": "JavaScript Execution Permission Required",
 		"This extension needs permission to execute JavaScript code on web pages":
@@ -186,6 +246,36 @@ const sitegeistTranslations = {
 		"Update Now": "Update Now",
 	},
 	de: {
+		"A custom provider with that name already exists": "A custom provider with that name already exists",
+		"API Key (optional)": "API Key (optional)",
+		"API Type": "API Type",
+		"Add Custom Provider": "Add Custom Provider",
+		"Add Model": "Add Model",
+		"Add at least one model": "Add at least one model",
+		"Base URL": "Base URL",
+		"Context window": "Context window",
+		"Defaults to model ID": "Defaults to model ID",
+		"Display Name (optional)": "Display Name (optional)",
+		"Edit Custom Provider": "Edit Custom Provider",
+		"Failed to save provider": "Failed to save provider",
+		"Leave empty if the endpoint needs no key": "Leave empty if the endpoint needs no key",
+		"Max output tokens": "Max output tokens",
+		"Model ID": "Model ID",
+		"Model IDs must be unique": "Model IDs must be unique",
+		Models: "Models",
+		"OpenAI-compatible base \u2014 usually ends in /v1.": "OpenAI-compatible base \u2014 usually ends in /v1.",
+		"Please enter a base URL": "Please enter a base URL",
+		"Please enter a provider name": "Please enter a provider name",
+		"Provider Name": "Provider Name",
+		"Provider saved": "Provider saved",
+		Reasoning: "Reasoning",
+		Remove: "Remove",
+		"Root URL \u2014 the client appends /v1/messages.": "Root URL \u2014 the client appends /v1/messages.",
+		Save: "Save",
+		"That name is reserved by a built-in provider. Choose a different name.":
+			"That name is reserved by a built-in provider. Choose a different name.",
+		Vision: "Vision",
+		"e.g. OpenRouter, Together, My Server": "e.g. OpenRouter, Together, My Server",
 		"Permission request failed": "Berechtigungsanfrage fehlgeschlagen",
 		"JavaScript Execution Permission Required": "JavaScript-Ausführungsberechtigung erforderlich",
 		"This extension needs permission to execute JavaScript code on web pages":

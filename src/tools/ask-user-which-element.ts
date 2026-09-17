@@ -12,6 +12,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Loader2, MousePointer2 } from "lucide";
+import { getCurrentBrowserSession } from "../browser/current.js";
 import { ASK_USER_WHICH_ELEMENT_TOOL_DESCRIPTION } from "../prompts/prompts.js";
 import "../utils/i18n-extension.js";
 
@@ -538,15 +539,13 @@ export class AskUserWhichElementTool implements AgentTool<typeof selectElementSc
 				throw new Error("Tool execution was aborted");
 			}
 
-			// Get the active tab
-			const [tab] = await chrome.tabs.query({
-				active: true,
-				currentWindow: true,
-			});
-
-			if (!tab || !tab.id) {
-				throw new Error("No active tab found");
+			// The user has to see the page to pick an element: bring the session tab forward
+			const session = getCurrentBrowserSession();
+			const tab = await session.requireCurrentTab();
+			if (!tab.id) {
+				throw new Error("No tab available");
 			}
+			await session.show(tab.id);
 
 			// Check if we can execute scripts on this tab
 			if (

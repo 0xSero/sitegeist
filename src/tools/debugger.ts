@@ -11,6 +11,8 @@ import { type Static, Type } from "@sinclair/typebox";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Bug } from "lucide";
+import { evaluateMain } from "../browser/cdp.js";
+import { getCurrentBrowserSession } from "../browser/current.js";
 
 // ============================================================================
 // TYPES
@@ -73,14 +75,10 @@ CRITICAL: Use browserjs() and repl tool for DOM manipulation. Use this ONLY for 
 			throw new Error("Debugger command aborted");
 		}
 
-		// Get active tab
-		const [tab] = await chrome.tabs.query({
-			active: true,
-			currentWindow: true,
-		});
-
-		if (!tab || !tab.id) {
-			throw new Error("No active tab found");
+		// The session's current tab
+		const tab = await getCurrentBrowserSession().requireCurrentTab();
+		if (!tab.id) {
+			throw new Error("No tab available");
 		}
 
 		try {
@@ -124,21 +122,8 @@ CRITICAL: Use browserjs() and repl tool for DOM manipulation. Use this ONLY for 
 					throw new Error("eval action requires code parameter");
 				}
 
-				// Attach debugger if not already attached
-				try {
-					await chrome.debugger.attach({ tabId: tab.id }, "1.3");
-				} catch (err) {
-					// Already attached is fine
-					if (!(err instanceof Error) || !err.message?.includes("already attached")) {
-						throw err;
-					}
-				}
-
-				// Execute code in MAIN world using Runtime.evaluate with returnByValue
-				const result = await chrome.debugger.sendCommand({ tabId: tab.id }, "Runtime.evaluate", {
-					expression: args.code,
-					returnByValue: true,
-				});
+				// Execute code in MAIN world through the session's debugger attachment
+				const result = await evaluateMain(tab.id, args.code);
 
 				// Extract the actual value
 				const details: DebuggerResult = { value: result };

@@ -1,22 +1,18 @@
+import { getCurrentBrowserSession, hasCurrentBrowserSession } from "../../browser/current.js";
 import { createOverlayScript, removeOverlayScript } from "./overlay-content.js";
 
 const OVERLAY_WORLD_ID = "sitegeist-repl-overlay";
 
 /**
- * Get the currently active tab ID.
- * @returns Tab ID of the active tab in the current window
- * @throws Error if no active tab is found
+ * The session's current tab id, if the session has one.
+ * @throws Error if there is no session or it has no tab yet
  */
 async function getActiveTabId(): Promise<number> {
-	const [tab] = await chrome.tabs.query({
-		active: true,
-		currentWindow: true,
-	});
-
-	if (!tab || !tab.id) {
-		throw new Error("No active tab found");
+	if (!hasCurrentBrowserSession()) throw new Error("No browser session");
+	const tab = await getCurrentBrowserSession().currentTab();
+	if (!tab?.id) {
+		throw new Error("Session has no tab yet");
 	}
-
 	return tab.id;
 }
 

@@ -39,7 +39,7 @@ export class CustomProvidersTab extends SettingsTab {
 		CustomProviderEditDialog.open(provider, () => this.loadProviders());
 	}
 
-	private async remove(provider: CustomProvider) {
+	private async removeProvider(provider: CustomProvider) {
 		if (!confirm(`Delete custom provider "${provider.name}"?`)) return;
 		try {
 			const storage = getSitegeistStorage();
@@ -69,7 +69,7 @@ export class CustomProvidersTab extends SettingsTab {
 				</div>
 				<div class="flex gap-2 flex-shrink-0">
 					${Button({ variant: "outline", size: "sm", onClick: () => this.edit(provider), children: "Edit" })}
-					${Button({ variant: "ghost", size: "sm", onClick: () => this.remove(provider), children: "Delete" })}
+					${Button({ variant: "ghost", size: "sm", onClick: () => this.removeProvider(provider), children: "Delete" })}
 				</div>
 			</div>
 		`;

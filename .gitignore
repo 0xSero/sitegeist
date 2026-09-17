@@ -9,3 +9,6 @@ sitegeist-latest.zip
 *.screenflow/
 *.mp4
 version.json
+docs/*.html
+cli/node_modules
+cli/dist

@@ -1,4 +1,6 @@
 import { ConsoleRuntimeProvider, RUNTIME_MESSAGE_ROUTER, type SandboxRuntimeProvider } from "@mariozechner/pi-web-ui";
+import { isRestrictedUrl } from "../../browser/cdp.js";
+import { getCurrentBrowserSession } from "../../browser/current.js";
 import {
 	BROWSERJS_RUNTIME_PROVIDER_DESCRIPTION,
 	NAVIGATE_RUNTIME_PROVIDER_DESCRIPTION,
@@ -114,30 +116,24 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 			return;
 		}
 
-		// Get current tab
-		const [tab] = await chrome.tabs.query({
-			active: true,
-			currentWindow: true,
-		});
-
-		if (!tab || !tab.id) {
-			respond({
-				success: false,
-				error: "No active tab found",
-			});
+		// The session's current tab (created on about:blank if the session has none)
+		let tab: chrome.tabs.Tab;
+		try {
+			tab = await getCurrentBrowserSession().requireCurrentTab();
+		} catch (err) {
+			respond({ success: false, error: err instanceof Error ? err.message : String(err) });
+			return;
+		}
+		if (!tab.id) {
+			respond({ success: false, error: "No tab available" });
 			return;
 		}
 
 		// Validate tab URL (reject chrome://, chrome-extension://, about: URLs)
-		if (
-			tab.url?.startsWith("chrome://") ||
-			tab.url?.startsWith("chrome-extension://") ||
-			tab.url?.startsWith("moz-extension://") ||
-			tab.url?.startsWith("about:")
-		) {
+		if (tab.url && isRestrictedUrl(tab.url)) {
 			respond({
 				success: false,
-				error: `Cannot execute scripts on ${tab.url}. Extension pages and internal URLs are protected.`,
+				error: `Cannot execute scripts on ${tab.url}. Navigate to a website first (use navigate).`,
 			});
 			return;
 		}

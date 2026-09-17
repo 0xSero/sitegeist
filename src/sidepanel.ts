@@ -22,11 +22,15 @@ import {
 	setShowJsonMode,
 } from "@mariozechner/pi-web-ui";
 import { html, render } from "lit";
-import { Circle, Download, History, Plus, Settings, Square } from "lucide";
+import { Circle, Download, History, Link, Plus, Settings, Square } from "lucide";
+import { isRestrictedUrl } from "./browser/cdp.js";
+import { setCurrentBrowserSession } from "./browser/current.js";
+import { BrowserSession, listSessions } from "./browser/session.js";
 import { Toast } from "./components/Toast.js";
 import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
 import { ApiKeysOAuthTab } from "./dialogs/ApiKeysOAuthTab.js";
+import { BridgeTab } from "./dialogs/BridgeTab.js";
 import { CostsTab } from "./dialogs/CostsTab.js";
 import { CustomProvidersTab } from "./dialogs/CustomProvidersTab.js";
 import { RecordSkillDialog } from "./dialogs/RecordSkillDialog.js";
@@ -44,6 +48,7 @@ import {
 } from "./messages/NavigationMessage.js";
 import { registerUserMessageRenderer } from "./messages/UserMessageRenderer.js";
 import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
+import { refreshDiscoveredModels } from "./models/registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { Recorder } from "./recording/recorder.js";
@@ -115,6 +120,51 @@ let authLabel = "";
 let recorder: Recorder | undefined;
 let isRecording = false;
 
+// The tabs this chat session owns (its own tab group; never the user's tabs)
+let browserSession: BrowserSession | undefined;
+let tempBrowserSessionId: string | undefined;
+
+function sessionLabel(): string {
+	const title = currentTitle.trim();
+	if (!title) return "chat";
+	return title.length > 28 ? `${title.slice(0, 27)}…` : title;
+}
+
+async function openBrowserSession(id: string): Promise<void> {
+	browserSession = await BrowserSession.open(id, sessionLabel(), currentWindowId);
+	setCurrentBrowserSession(browserSession);
+	renderApp();
+}
+
+/** Unsaved chats get a throwaway session id until they are persisted. */
+function ensureTempBrowserSessionId(): string {
+	if (!tempBrowserSessionId) tempBrowserSessionId = `temp-${crypto.randomUUID()}`;
+	return tempBrowserSessionId;
+}
+
+/** Temp sessions that never got a tab are noise; drop them at startup. */
+async function pruneEmptyTempSessions(): Promise<void> {
+	for (const s of await listSessions()) {
+		if (s.id.startsWith("temp-") && s.tabIds.length === 0) {
+			const session = await BrowserSession.open(s.id, s.label, s.windowId);
+			await session.close();
+		}
+	}
+}
+
+/** User gesture: hand the tab they are looking at to the agent. */
+async function shareActiveTab(): Promise<void> {
+	if (!browserSession) return;
+	const [tab] = await chrome.tabs.query({ active: true, windowId: currentWindowId });
+	if (!tab?.id || !tab.url || isRestrictedUrl(tab.url)) {
+		Toast.error("This page cannot be shared with the agent");
+		return;
+	}
+	await browserSession.adopt(tab.id, true);
+	Toast.success("Tab shared with the agent");
+	renderApp();
+}
+
 /**
  * Slash-command provider for the chat input: lists skills (recordings included),
  * site-scoped first, and inserts an @skill:<id> reference the agent retrieves.
@@ -123,8 +173,7 @@ function buildSkillSlashProvider() {
 	return async (query: string) => {
 		let url: string | undefined;
 		try {
-			const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-			url = tab?.url;
+			url = (await browserSession?.currentTab())?.url;
 		} catch {
 			/* ignore */
 		}
@@ -204,7 +253,7 @@ const DEFAULT_MODELS: Record<string, string> = {
 	"minimax-cn": "MiniMax-M2.1",
 	mistral: "devstral-medium-latest",
 	openai: "gpt-4o-mini",
-	"openai-codex": "gpt-5.1-codex-mini",
+	"openai-codex": "gpt-5.5",
 	opencode: "claude-opus-4-6",
 	"opencode-go": "kimi-k2.5",
 	openrouter: "openai/gpt-5.1-codex",
@@ -281,6 +330,7 @@ function openApiKeysDialog(): Promise<void> {
 				new CustomProvidersTab(),
 				new CostsTab(),
 				new SkillsTab(),
+				new BridgeTab(),
 				new ProxyTab(),
 				new AboutTab(),
 			],
@@ -446,6 +496,9 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 	// version of skills, even if they were updated since the session was created
 	shownSkills.clear();
 
+	// Every chat owns a browser session; unsaved chats use a temporary id until first save
+	await openBrowserSession(currentSessionId ?? ensureTempBrowserSessionId());
+
 	// Load debugger mode setting
 	const stored = await chrome.storage.local.get("debuggerMode");
 	const debuggerModeEnabled = stored.debuggerMode || false;
@@ -532,10 +585,19 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 
 			if (!currentTitle && shouldSaveSession(messages)) {
 				currentTitle = generateTitle(messages);
+				browserSession?.setLabel(sessionLabel()).catch(() => {});
 			}
 
 			if (!currentSessionId && shouldSaveSession(messages)) {
 				currentSessionId = crypto.randomUUID();
+				if (tempBrowserSessionId) {
+					const tempId = tempBrowserSessionId;
+					const newId = currentSessionId;
+					tempBrowserSessionId = undefined;
+					BrowserSession.rename(tempId, newId)
+						.then(() => openBrowserSession(newId))
+						.catch((err) => console.error("Failed to rename browser session:", err));
+				}
 
 				port
 					.sendMessage({
@@ -572,6 +634,8 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 				openApiKeysDialog();
 				return;
 			}
+			// Cached lists are already registered; give stale providers a moment to refresh.
+			await refreshDiscoveredModels(storage, { wait: true, timeoutMs: 4000 }).catch(() => {});
 			ModelSelector.open(
 				agent.state.model,
 				(model) => {
@@ -595,12 +659,9 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 		onBeforeSend: async () => {
 			if (!agent) return;
 
-			// Get current tab info
-			const [tab] = await chrome.tabs.query({
-				active: true,
-				currentWindow: true,
-			});
-			if (!tab?.url || tab.url.startsWith("chrome-extension://") || tab.url.startsWith("moz-extension://")) return;
+			// The session's current tab (nothing if the session has no tab yet)
+			const tab = await browserSession?.currentTab();
+			if (!tab?.url || isRestrictedUrl(tab.url)) return;
 
 			// Find most recent navigation (either nav message or nav tool result)
 			let lastUrl: string | undefined;
@@ -655,7 +716,6 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			};
 
 			const extractImageTool = new ExtractImageTool();
-			extractImageTool.windowId = currentWindowId;
 
 			const tools: AgentTool<any, any>[] = [
 				navigateTool,
@@ -816,6 +876,13 @@ const renderApp = () => {
 					${Button({
 						variant: "ghost",
 						size: "sm",
+						children: icon(Link, "sm"),
+						onClick: shareActiveTab,
+						title: "Share the tab you are viewing with the agent",
+					})}
+					${Button({
+						variant: "ghost",
+						size: "sm",
 						children: icon(isRecording ? Square : Circle, "sm"),
 						className: isRecording ? "text-red-500 animate-pulse" : "",
 						onClick: toggleRecording,
@@ -839,6 +906,7 @@ const renderApp = () => {
 								new CustomProvidersTab(),
 								new CostsTab(),
 								new SkillsTab(),
+								new BridgeTab(),
 								new ProxyTab(),
 								new AboutTab(),
 							]),
@@ -859,46 +927,20 @@ const renderApp = () => {
 // TAB NAVIGATION TRACKING
 // ============================================================================
 
-// Listen for tab updates and insert navigation messages only when agent is running
-chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
-	// Only care about URL changes on the active tab while agent is working
-	// Ignore chrome-extension:// URLs (extension internal pages)
-	// Ignore tool-initiated navigations (handled by the navigate tool itself)
-	// Ignore tabs from other windows
+// The agent only hears about URL changes on its own current tab (a page redirecting
+// or the user navigating a shared tab). The user's other tabs are never observed.
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 	if (
 		changeInfo.url &&
-		tab.active &&
 		tab.url &&
-		tab.windowId === currentWindowId &&
+		browserSession?.currentTabId === tabId &&
 		agent?.state.isStreaming &&
-		!tab.url.startsWith("chrome-extension://") &&
-		!tab.url.startsWith("moz-extension://") &&
+		!isRestrictedUrl(tab.url) &&
 		!isToolNavigating()
 	) {
 		const navMessage = await createNavigationMessage(tab.url, tab.title || "Untitled", tab.favIconUrl, tab.id);
 		agent.steer(navMessage);
-		console.log("Queued navigation message for tab switch to", tab.url);
-	}
-});
-
-// Listen for tab activation (user switches tabs) only when agent is running
-chrome.tabs.onActivated.addListener(async (activeInfo) => {
-	// Ignore tab activations from other windows
-	if (activeInfo.windowId !== currentWindowId) return;
-
-	const tab = await chrome.tabs.get(activeInfo.tabId);
-	// Ignore chrome-extension:// URLs (extension internal pages)
-	// Ignore tool-initiated navigations (handled by the navigate tool itself)
-	if (
-		tab.url &&
-		agent?.state.isStreaming &&
-		!tab.url.startsWith("chrome-extension://") &&
-		!tab.url.startsWith("moz-extension://") &&
-		!isToolNavigating()
-	) {
-		const navMessage = await createNavigationMessage(tab.url, tab.title || "Untitled", tab.favIconUrl, tab.id);
-		agent.steer(navMessage);
-		console.log("Queued navigation message for tab switch to", tab.url);
+		console.log("Queued navigation message for", tab.url);
 	}
 });
 
@@ -1067,6 +1109,11 @@ async function initApp() {
 	// Initialize port communication system
 	port.initialize(currentWindowId);
 
+	pruneEmptyTempSessions().catch(() => {});
+
+	// Register cached provider model lists now; refresh stale ones in the background.
+	refreshDiscoveredModels(storage).catch((err) => console.warn("Model discovery failed:", err));
+
 	// TODO reenable Request persistent storage
 	// if (storage.sessions) {
 	// 	await PersistentStorageDialog.request();
@@ -1177,6 +1224,7 @@ async function initApp() {
 	if (!(await hasAnyApiKey())) {
 		await WelcomeSetupDialog.show();
 		await openApiKeysDialog();
+		await refreshDiscoveredModels(storage, { wait: true }).catch(() => {});
 		await selectDefaultModelForAvailableProvider();
 		renderApp();
 	}

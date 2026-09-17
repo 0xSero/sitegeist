@@ -17,7 +17,7 @@ import {
 	serializeOAuthCredentials,
 } from "./types.js";
 
-export { type OAuthCredentials, isOAuthCredentials, parseOAuthCredentials, serializeOAuthCredentials };
+export { isOAuthCredentials, type OAuthCredentials, parseOAuthCredentials, serializeOAuthCredentials };
 
 export type OAuthProviderId = "anthropic" | "openai-codex" | "github-copilot" | "google-gemini-cli";
 

@@ -16,6 +16,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Sparkles } from "lucide";
+import { getCurrentBrowserSession, hasCurrentBrowserSession } from "../browser/current.js";
 import { DomainPill } from "../components/DomainPill.js";
 import { SkillPill } from "../components/SkillPill.js";
 import { SKILL_TOOL_DESCRIPTION } from "../prompts/prompts.js";
@@ -202,10 +203,7 @@ export const skillTool: AgentTool<typeof skillParamsSchema, any> = {
 	parameters: skillParamsSchema,
 	execute: async (_toolCallId: string, args: SkillParams) => {
 		const skillsRepo = getSkills();
-		const [tab] = await chrome.tabs.query({
-			active: true,
-			currentWindow: true,
-		});
+		const tab = hasCurrentBrowserSession() ? await getCurrentBrowserSession().currentTab() : undefined;
 		const currentUrl = tab?.url || "";
 
 		switch (args.action) {
