@@ -18,6 +18,14 @@ startBridge();
 // switching back shows it again. When no panel is open, every tab can open one.
 
 const panelEnabledCache = new Map<number, boolean>();
+const PANEL_BUSY_PREFIX = "sidepanel_busy_";
+
+/** True while the panel's agent in this window is mid-run; the panel must not be torn down then. */
+async function panelBusy(windowId: number): Promise<boolean> {
+	const key = `${PANEL_BUSY_PREFIX}${windowId}`;
+	const data = await chrome.storage.session.get(key);
+	return data[key] === true;
+}
 
 async function ownedTabsForWindow(windowId: number): Promise<Set<number> | null> {
 	const sessions = (await listSessions()).filter((s) => !s.id.startsWith("bridge-") && s.windowId === windowId);
@@ -42,7 +50,10 @@ async function syncPanelForWindow(windowId: number): Promise<void> {
 	// recreates it on an owned one, so "no port" does not mean "closed by the user".
 	// The per-tab state therefore follows the session's tabs alone; opening the panel
 	// explicitly (icon or shortcut) re-enables the tab it is opened on.
-	const owned = await ownedTabsForWindow(windowId);
+	// Hiding the panel destroys its document, which would abort a running agent. While
+	// the agent works the panel stays available everywhere in the window; once it is idle
+	// the panel is confined to its own tabs again.
+	const owned = (await panelBusy(windowId)) ? null : await ownedTabsForWindow(windowId);
 	for (const tab of tabs) {
 		if (tab.id === undefined) continue;
 		await setPanelEnabled(tab.id, owned === null ? true : owned.has(tab.id));
@@ -64,7 +75,10 @@ chrome.tabs.onActivated.addListener((info) => void syncPanelForWindow(info.windo
 chrome.tabs.onCreated.addListener((tab) => void syncPanelForWindow(tab.windowId));
 chrome.tabs.onRemoved.addListener((tabId) => panelEnabledCache.delete(tabId));
 chrome.storage.onChanged.addListener((changes, area) => {
-	if (area === "session" && "browser_sessions" in changes) void syncAllPanels();
+	if (area !== "session") return;
+	if ("browser_sessions" in changes || Object.keys(changes).some((k) => k.startsWith(PANEL_BUSY_PREFIX))) {
+		void syncAllPanels();
+	}
 });
 
 // Called when Sitegeist icon is clicked - opens sidepanel for current tab

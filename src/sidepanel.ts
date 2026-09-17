@@ -130,6 +130,19 @@ const recordedCostMessages = new Set<AgentMessage>();
 let recorder: Recorder | undefined;
 let isRecording = false;
 
+// Tells the service worker whether the agent is mid-run, so the panel is not hidden
+// (and its document destroyed) on other tabs while work is in progress.
+let lastPublishedBusy: boolean | undefined;
+function publishBusyState(): void {
+	const busy = agent?.state.isStreaming === true;
+	if (busy === lastPublishedBusy) return;
+	lastPublishedBusy = busy;
+	chrome.storage.session.set({ [`sidepanel_busy_${currentWindowId}`]: busy }).catch(() => undefined);
+}
+window.addEventListener("pagehide", () => {
+	chrome.storage.session.remove(`sidepanel_busy_${currentWindowId}`).catch(() => undefined);
+});
+
 // The tabs this chat session owns (its own tab group; never the user's tabs)
 let browserSession: BrowserSession | undefined;
 let tempBrowserSessionId: string | undefined;
@@ -574,6 +587,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 	if (shouldSave) {
 		agentUnsubscribe = agent.subscribe((event: AgentEvent) => {
 			const messages = agent.state.messages;
+			publishBusyState();
 
 			storage.settings
 				.set("lastUsedModel", agent.state.model)
