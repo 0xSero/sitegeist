@@ -121,7 +121,11 @@ async function onClientConnected(msg: HostClientConnected): Promise<void> {
 async function onClientDisconnected(clientId: string): Promise<void> {
 	const state = clients.get(clientId);
 	clients.delete(clientId);
-	if (state?.session) await state.session.suspend();
+	if (state?.session) {
+		// A session that never opened a tab has nothing to re-adopt; drop it instead of piling up.
+		if (state.session.tabIds.length === 0) await state.session.close();
+		else await state.session.suspend();
+	}
 	for (const [requestId, resolve] of pendingDecisions) {
 		if (requestId.startsWith(`${clientId}:`)) {
 			resolve("deny");
@@ -336,7 +340,10 @@ function onHostMessage(message: HostToExt): void {
 					await time("debugger.getTargets", async () => {
 						timings.targetCount = (await chrome.debugger.getTargets()).length;
 					});
-					await time("session.open", () => BrowserSession.open(`bench-${Date.now()}`, "bench"));
+					await time("session.open", async () => {
+						const s = await BrowserSession.open(`bench-${Date.now()}`, "bench");
+						await s.close();
+					});
 					send({ type: "response", clientId: message.clientId, id: message.id, result: timings });
 				})();
 				return;
