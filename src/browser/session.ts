@@ -75,6 +75,46 @@ export async function listSessions(): Promise<PersistedSession[]> {
 	return Object.values(await readTable());
 }
 
+/**
+ * Ungroup tabs sitting in "Sitegeist · ..." groups that no live session owns (left behind
+ * by an extension reload, which clears session storage but not the browser's groups).
+ */
+export async function cleanupOrphanGroups(): Promise<number> {
+	const table = await readTable();
+	const liveGroups = new Set<number>();
+	for (const s of Object.values(table)) if (s.groupId !== undefined) liveGroups.add(s.groupId);
+	const groups = await chrome.tabGroups.query({}).catch(() => []);
+	let released = 0;
+	for (const g of groups) {
+		if (!g.title?.startsWith(`${GROUP_PREFIX} ·`) || liveGroups.has(g.id)) continue;
+		const tabs = await chrome.tabs.query({ groupId: g.id }).catch(() => []);
+		for (const t of tabs) {
+			if (t.id === undefined) continue;
+			await chrome.tabs.ungroup(t.id).catch(() => undefined);
+			released++;
+		}
+	}
+	return released;
+}
+
+/**
+ * Keep a single live side-panel group per window: release every other non-bridge
+ * session in the window (ungroup its tabs, which stay open, and forget it).
+ */
+export async function releaseOtherPanelSessions(windowId: number, keepId: string): Promise<void> {
+	const table = await readTable();
+	for (const s of Object.values(table)) {
+		if (s.id === keepId || s.id.startsWith("bridge-") || s.windowId !== windowId) continue;
+		for (const tabId of s.tabIds) {
+			await detachTab(tabId);
+			await chrome.tabs.ungroup(tabId).catch(() => undefined);
+		}
+		delete table[s.id];
+		instances.delete(s.id);
+	}
+	await writeTable(table);
+}
+
 function pickColor(table: SessionTable): `${chrome.tabGroups.Color}` {
 	const used = new Set(Object.values(table).map((s) => s.color));
 	return GROUP_COLORS.find((c) => !used.has(c)) ?? GROUP_COLORS[Object.keys(table).length % GROUP_COLORS.length];

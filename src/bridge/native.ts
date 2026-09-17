@@ -261,7 +261,24 @@ function onHostMessage(message: HostToExt): void {
 				return;
 			}
 			if (message.method === "bridge.debug") {
-				Promise.all([listSessions(), chrome.permissions.getAll()]).then(([sessions, perms]) =>
+				Promise.all([
+					listSessions(),
+					chrome.permissions.getAll(),
+					chrome.storage.session.get(["sidepanel_last_error", "sidepanel_open_windows"]),
+					chrome.tabGroups
+						.query({})
+						.then((groups) =>
+							groups
+								.filter((g) => g.title?.startsWith("Sitegeist"))
+								.map((g) => ({ id: g.id, title: g.title, windowId: g.windowId })),
+						)
+						.catch(() => []),
+					chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(async ([tab]) => {
+						if (!tab?.id) return null;
+						const options = await chrome.sidePanel.getOptions({ tabId: tab.id }).catch(() => null);
+						return { tabId: tab.id, url: tab.url, groupId: tab.groupId, options };
+					}),
+				]).then(([sessions, perms, panelState, groups, activeTab]) =>
 					send({
 						type: "response",
 						clientId: message.clientId,
@@ -269,6 +286,7 @@ function onHostMessage(message: HostToExt): void {
 						result: {
 							version: chrome.runtime.getManifest().version,
 							userScriptsApi: typeof (chrome as { userScripts?: unknown }).userScripts !== "undefined",
+							sidePanel: { ...panelState, activeTab, groups },
 							grantedPermissions: perms.permissions ?? [],
 							workerUptimeS: Math.round((Date.now() - WORKER_STARTED_AT) / 1000),
 							log: [...log],

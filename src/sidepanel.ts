@@ -26,7 +26,7 @@ import { Circle, Download, History, Link, Plus, Settings, Square } from "lucide"
 import { isRestrictedUrl } from "./browser/cdp.js";
 import { setCurrentBrowserSession } from "./browser/current.js";
 import { dispatchToSandbox, setCdpMessageHandler } from "./browser/inject.js";
-import { BrowserSession, listSessions } from "./browser/session.js";
+import { BrowserSession, listSessions, releaseOtherPanelSessions } from "./browser/session.js";
 import { Toast } from "./components/Toast.js";
 import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
@@ -154,6 +154,8 @@ function sessionLabel(): string {
 }
 
 async function openBrowserSession(id: string): Promise<void> {
+	// Any other panel session left in this window gives its tabs back (ungrouped, still open).
+	await releaseOtherPanelSessions(currentWindowId, id);
 	browserSession = await BrowserSession.open(id, sessionLabel(), currentWindowId);
 	setCurrentBrowserSession(browserSession);
 	// The tab the panel was opened on becomes the session's first tab, so the tab group

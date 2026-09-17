@@ -1,10 +1,13 @@
 import { startBridge } from "./bridge/native.js";
 import { startForegroundGuard } from "./browser/foreground-guard.js";
-import { listSessions } from "./browser/session.js";
+import { cleanupOrphanGroups, listSessions } from "./browser/session.js";
 import type { LockedSessionsMessage, LockResultMessage, SidepanelToBackgroundMessage } from "./utils/port.js";
 
 // Keep popups opened by agent-driven background tabs from stealing the user's focus.
 startForegroundGuard();
+
+// Groups from before an extension reload have no owning session any more; give the tabs back.
+cleanupOrphanGroups().catch(() => undefined);
 
 // External harnesses (omp, pi, Claude Code, Codex) drive the browser through the
 // native-messaging bridge. Connects when the CLI has installed the host manifest.
@@ -34,14 +37,25 @@ async function ownedTabsForWindow(windowId: number): Promise<Set<number> | null>
 	return owned.size > 0 ? owned : null;
 }
 
+const PANEL_PATH = "sidepanel.html";
+
 async function setPanelEnabled(tabId: number, enabled: boolean): Promise<void> {
 	if (panelEnabledCache.get(tabId) === enabled) return;
 	panelEnabledCache.set(tabId, enabled);
 	try {
-		await chrome.sidePanel.setOptions({ tabId, enabled });
+		// A tab-specific option must carry the path, or Chrome has no panel to open there.
+		await chrome.sidePanel.setOptions({ tabId, path: PANEL_PATH, enabled });
 	} catch {
 		panelEnabledCache.delete(tabId);
 	}
+}
+
+function recordPanelError(where: string, err: unknown): void {
+	const message = `${where}: ${err instanceof Error ? err.message : String(err)}`;
+	console.warn("[Background]", message);
+	chrome.storage.session
+		.set({ sidepanel_last_error: `${new Date().toISOString()} ${message}` })
+		.catch(() => undefined);
 }
 
 async function syncPanelForWindow(windowId: number): Promise<void> {
@@ -67,7 +81,9 @@ async function syncPanelForWindow(windowId: number): Promise<void> {
  */
 function enablePanelForTab(tabId: number): void {
 	panelEnabledCache.set(tabId, true);
-	chrome.sidePanel.setOptions({ tabId, enabled: true }).catch(() => undefined);
+	chrome.sidePanel
+		.setOptions({ tabId, path: PANEL_PATH, enabled: true })
+		.catch((err) => recordPanelError("setOptions", err));
 }
 
 async function syncAllPanels(): Promise<void> {
@@ -91,7 +107,7 @@ chrome.action.onClicked.addListener((tab: chrome.tabs.Tab) => {
 	if (tabId && chrome.sidePanel.open) {
 		// The tab may be outside the current session's group; opening here adopts it.
 		enablePanelForTab(tabId);
-		chrome.sidePanel.open({ tabId }).catch((err) => console.warn("[Background] sidePanel.open failed:", err));
+		chrome.sidePanel.open({ tabId }).catch((err) => recordPanelError("open(action)", err));
 	}
 });
 
@@ -220,7 +236,7 @@ chrome.commands.onCommand.addListener((command: string, sender?: chrome.tabs.Tab
 			// Sidepanel is closed - open it on this tab (enabling it there if it was outside the group)
 			const tabId = sender.id;
 			enablePanelForTab(tabId);
-			chrome.sidePanel.open({ tabId }).catch((err) => console.warn("[Background] sidePanel.open failed:", err));
+			chrome.sidePanel.open({ tabId }).catch((err) => recordPanelError("open(command)", err));
 		} else {
 			chrome.sidePanel.open({ windowId });
 		}
