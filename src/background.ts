@@ -95,10 +95,8 @@ chrome.tabs.onActivated.addListener((info) => void syncPanelForWindow(info.windo
 chrome.tabs.onCreated.addListener((tab) => void syncPanelForWindow(tab.windowId));
 chrome.tabs.onRemoved.addListener((tabId) => panelEnabledCache.delete(tabId));
 chrome.storage.onChanged.addListener((changes, area) => {
-	if (area !== "session") return;
-	if ("browser_sessions" in changes || Object.keys(changes).some((k) => k.startsWith(PANEL_BUSY_PREFIX))) {
-		void syncAllPanels();
-	}
+	if (area === "local" && "browser_sessions" in changes) void syncAllPanels();
+	if (area === "session" && Object.keys(changes).some((k) => k.startsWith(PANEL_BUSY_PREFIX))) void syncAllPanels();
 });
 
 // Called when Sitegeist icon is clicked - opens sidepanel for current tab

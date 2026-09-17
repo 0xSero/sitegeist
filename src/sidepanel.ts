@@ -168,7 +168,9 @@ async function openBrowserSession(id: string): Promise<void> {
 async function adoptActiveTab(notify: boolean): Promise<void> {
 	if (!browserSession) return;
 	const [tab] = await chrome.tabs.query({ active: true, windowId: currentWindowId });
-	if (!tab?.id || !tab.url || isRestrictedUrl(tab.url)) {
+	// Any tab can be the session's start, including a New Tab page the agent will navigate
+	// away from; only the extension's own pages are excluded.
+	if (!tab?.id || (tab.url ?? "").startsWith("chrome-extension://")) {
 		if (notify) Toast.error("This page cannot be shared with the agent");
 		return;
 	}
@@ -185,15 +187,15 @@ async function adoptActiveTab(notify: boolean): Promise<void> {
 async function ensureTempBrowserSessionId(): Promise<string> {
 	if (tempBrowserSessionId) return tempBrowserSessionId;
 	const key = `temp_browser_session_${currentWindowId}`;
-	const stored = await chrome.storage.session.get(key);
+	const stored = await chrome.storage.local.get(key);
 	const existing = stored[key] as string | undefined;
 	tempBrowserSessionId = existing ?? `temp-${crypto.randomUUID()}`;
-	if (!existing) await chrome.storage.session.set({ [key]: tempBrowserSessionId });
+	if (!existing) await chrome.storage.local.set({ [key]: tempBrowserSessionId });
 	return tempBrowserSessionId;
 }
 
 async function forgetTempBrowserSessionId(): Promise<void> {
-	await chrome.storage.session.remove(`temp_browser_session_${currentWindowId}`);
+	await chrome.storage.local.remove(`temp_browser_session_${currentWindowId}`);
 	tempBrowserSessionId = undefined;
 }
 

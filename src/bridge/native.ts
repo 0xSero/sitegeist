@@ -327,7 +327,7 @@ function onHostMessage(message: HostToExt): void {
 						}
 						timings[label] = Math.round(performance.now() - t);
 					};
-					await time("storage.session.get", () => chrome.storage.session.get("browser_sessions"));
+					await time("storage.local.get(sessions)", () => chrome.storage.local.get("browser_sessions"));
 					await time("storage.local.get", () => chrome.storage.local.get("bridge_enabled"));
 					await time("windows.getLastFocused", () => chrome.windows.getLastFocused({ windowTypes: ["normal"] }));
 					await time("windows.getAll", () => chrome.windows.getAll());

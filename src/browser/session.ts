@@ -7,9 +7,10 @@
  * outside the group. Nothing here changes window focus or the active tab; that is
  * reserved for the explicit `show()` call.
  *
- * State is mirrored to chrome.storage.session so it survives sidepanel reloads and
- * service worker restarts. It is cleared when the browser exits, which is when the
- * tabs are gone too.
+ * State is mirrored to chrome.storage.local so it survives sidepanel reloads, service
+ * worker restarts and extension reloads (Chrome's tab groups do too). Tab and group ids
+ * that no longer exist are dropped on reconcile, which is what happens after a browser
+ * restart.
  */
 
 import { detachTab, ensureAttached, isRestrictedUrl } from "./cdp.js";
@@ -48,12 +49,26 @@ interface PersistedSession {
 type SessionTable = Record<string, PersistedSession>;
 
 async function readTable(): Promise<SessionTable> {
-	const data = await chrome.storage.session.get(STORAGE_KEY);
+	const data = await chrome.storage.local.get(STORAGE_KEY);
 	return (data[STORAGE_KEY] as SessionTable | undefined) ?? {};
 }
 
 async function writeTable(table: SessionTable): Promise<void> {
-	await chrome.storage.session.set({ [STORAGE_KEY]: table });
+	await chrome.storage.local.set({ [STORAGE_KEY]: table });
+}
+
+/** Chromium refuses tab edits while a tab is being dragged or animated; retry briefly. */
+async function withGroupRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+	let lastError: unknown;
+	for (let i = 0; i < attempts; i++) {
+		try {
+			return await fn();
+		} catch (err) {
+			lastError = err;
+			await new Promise((r) => setTimeout(r, 250 * (i + 1)));
+		}
+	}
+	throw lastError;
 }
 
 /** Tab ids owned by any session. Used by the foreground guard in the service worker. */
@@ -264,13 +279,16 @@ export class BrowserSession {
 				}
 			}
 			if (this.state.groupId !== undefined) {
-				await chrome.tabs.group({ tabIds: [tabId], groupId: this.state.groupId });
+				const groupId = this.state.groupId;
+				await withGroupRetry(() => chrome.tabs.group({ tabIds: [tabId], groupId }));
 			} else {
 				const tab = await chrome.tabs.get(tabId);
-				this.state.groupId = await chrome.tabs.group({
-					tabIds: [tabId],
-					createProperties: { windowId: tab.windowId },
-				});
+				// A tab already in someone else's group has to leave it first.
+				if (tab.groupId !== undefined && tab.groupId !== -1)
+					await chrome.tabs.ungroup(tabId).catch(() => undefined);
+				this.state.groupId = await withGroupRetry(() =>
+					chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } }),
+				);
 				await chrome.tabGroups.update(this.state.groupId, { title: this.groupTitle(), color: this.state.color });
 			}
 		} catch (err) {
