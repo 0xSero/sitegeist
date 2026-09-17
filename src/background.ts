@@ -1,5 +1,6 @@
 import { startBridge } from "./bridge/native.js";
 import { startForegroundGuard } from "./browser/foreground-guard.js";
+import { listSessions } from "./browser/session.js";
 import type { LockedSessionsMessage, LockResultMessage, SidepanelToBackgroundMessage } from "./utils/port.js";
 
 // Keep popups opened by agent-driven background tabs from stealing the user's focus.
@@ -9,11 +10,69 @@ startForegroundGuard();
 // native-messaging bridge. Connects when the CLI has installed the host manifest.
 startBridge();
 
+// ============================================================================
+// SIDE PANEL FOLLOWS ITS TAB GROUP
+// ============================================================================
+// While a side panel is open in a window, it stays available only on the tabs its
+// session owns (the session's tab group). Switching to any other tab hides it;
+// switching back shows it again. When no panel is open, every tab can open one.
+
+const panelEnabledCache = new Map<number, boolean>();
+
+async function ownedTabsForWindow(windowId: number): Promise<Set<number> | null> {
+	const sessions = (await listSessions()).filter((s) => !s.id.startsWith("bridge-") && s.windowId === windowId);
+	const owned = new Set<number>();
+	for (const s of sessions) for (const id of s.tabIds) owned.add(id);
+	return owned.size > 0 ? owned : null;
+}
+
+async function setPanelEnabled(tabId: number, enabled: boolean): Promise<void> {
+	if (panelEnabledCache.get(tabId) === enabled) return;
+	panelEnabledCache.set(tabId, enabled);
+	try {
+		await chrome.sidePanel.setOptions({ tabId, enabled });
+	} catch {
+		panelEnabledCache.delete(tabId);
+	}
+}
+
+async function syncPanelForWindow(windowId: number): Promise<void> {
+	const tabs = await chrome.tabs.query({ windowId }).catch(() => []);
+	// Chrome tears the panel document down while it is hidden on a foreign tab and
+	// recreates it on an owned one, so "no port" does not mean "closed by the user".
+	// The per-tab state therefore follows the session's tabs alone; opening the panel
+	// explicitly (icon or shortcut) re-enables the tab it is opened on.
+	const owned = await ownedTabsForWindow(windowId);
+	for (const tab of tabs) {
+		if (tab.id === undefined) continue;
+		await setPanelEnabled(tab.id, owned === null ? true : owned.has(tab.id));
+	}
+}
+
+/** Make the panel available on a tab the user is deliberately opening it on. */
+async function enablePanelForTab(tabId: number): Promise<void> {
+	panelEnabledCache.set(tabId, true);
+	await chrome.sidePanel.setOptions({ tabId, enabled: true }).catch(() => undefined);
+}
+
+async function syncAllPanels(): Promise<void> {
+	const windows = await chrome.windows.getAll({ windowTypes: ["normal"] }).catch(() => []);
+	for (const w of windows) if (w.id !== undefined) await syncPanelForWindow(w.id);
+}
+
+chrome.tabs.onActivated.addListener((info) => void syncPanelForWindow(info.windowId));
+chrome.tabs.onCreated.addListener((tab) => void syncPanelForWindow(tab.windowId));
+chrome.tabs.onRemoved.addListener((tabId) => panelEnabledCache.delete(tabId));
+chrome.storage.onChanged.addListener((changes, area) => {
+	if (area === "session" && "browser_sessions" in changes) void syncAllPanels();
+});
+
 // Called when Sitegeist icon is clicked - opens sidepanel for current tab
 chrome.action.onClicked.addListener((tab: chrome.tabs.Tab) => {
 	const tabId = tab?.id;
 	if (tabId && chrome.sidePanel.open) {
-		chrome.sidePanel.open({ tabId });
+		// The tab may be outside the current session's group; opening here adopts it.
+		enablePanelForTab(tabId).then(() => chrome.sidePanel.open({ tabId }));
 	}
 });
 
@@ -138,8 +197,11 @@ chrome.commands.onCommand.addListener((command: string, sender?: chrome.tabs.Tab
 		if (openSidepanels.has(windowId)) {
 			// Sidepanel is open - close it using Chrome 141+ API
 			closeSidepanel(windowId);
+		} else if (sender?.id !== undefined) {
+			// Sidepanel is closed - open it on this tab (enabling it there if it was outside the group)
+			const tabId = sender.id;
+			enablePanelForTab(tabId).then(() => chrome.sidePanel.open({ tabId }));
 		} else {
-			// Sidepanel is closed - open it
 			chrome.sidePanel.open({ windowId });
 		}
 	}

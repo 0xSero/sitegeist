@@ -162,10 +162,24 @@ async function adoptActiveTab(notify: boolean): Promise<void> {
 	if (notify) Toast.success("Tab shared with the agent");
 }
 
-/** Unsaved chats get a throwaway session id until they are persisted. */
-function ensureTempBrowserSessionId(): string {
-	if (!tempBrowserSessionId) tempBrowserSessionId = `temp-${crypto.randomUUID()}`;
+/**
+ * Unsaved chats get a throwaway session id until they are persisted. It is remembered
+ * per window so a panel that Chrome tears down and recreates (hidden on a foreign tab,
+ * shown again on an owned one) keeps its tab group.
+ */
+async function ensureTempBrowserSessionId(): Promise<string> {
+	if (tempBrowserSessionId) return tempBrowserSessionId;
+	const key = `temp_browser_session_${currentWindowId}`;
+	const stored = await chrome.storage.session.get(key);
+	const existing = stored[key] as string | undefined;
+	tempBrowserSessionId = existing ?? `temp-${crypto.randomUUID()}`;
+	if (!existing) await chrome.storage.session.set({ [key]: tempBrowserSessionId });
 	return tempBrowserSessionId;
+}
+
+async function forgetTempBrowserSessionId(): Promise<void> {
+	await chrome.storage.session.remove(`temp_browser_session_${currentWindowId}`);
+	tempBrowserSessionId = undefined;
 }
 
 /** Temp sessions that never got a tab are noise; drop them at startup. */
@@ -497,7 +511,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 	shownSkills.clear();
 
 	// Every chat owns a browser session; unsaved chats use a temporary id until first save
-	await openBrowserSession(currentSessionId ?? ensureTempBrowserSessionId());
+	await openBrowserSession(currentSessionId ?? (await ensureTempBrowserSessionId()));
 
 	// Load debugger mode setting
 	const stored = await chrome.storage.local.get("debuggerMode");
@@ -588,8 +602,8 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 				if (tempBrowserSessionId) {
 					const tempId = tempBrowserSessionId;
 					const newId = currentSessionId;
-					tempBrowserSessionId = undefined;
-					BrowserSession.rename(tempId, newId)
+					forgetTempBrowserSessionId()
+						.then(() => BrowserSession.rename(tempId, newId))
 						.then(() => openBrowserSession(newId))
 						.catch((err) => console.error("Failed to rename browser session:", err));
 				}
@@ -1153,6 +1167,8 @@ async function initApp() {
 	const urlParams = new URLSearchParams(window.location.search);
 	let sessionIdFromUrl = urlParams.get("session");
 	const isNewSession = urlParams.get("new") === "true";
+	// An explicit new chat must not inherit the previous unsaved chat's tab group.
+	if (isNewSession || sessionIdFromUrl) await forgetTempBrowserSessionId();
 
 	// If no session in URL and not explicitly creating new, try to load the most recent session
 	if (!sessionIdFromUrl && !isNewSession && storage.sessions) {
