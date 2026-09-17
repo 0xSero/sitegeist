@@ -113,8 +113,8 @@ async function onClientConnected(msg: HostClientConnected): Promise<void> {
 		queue: Promise.resolve(),
 	};
 	clients.set(msg.clientId, state);
-	// Open eagerly so the tab group exists (and re-adopts tabs) before the first call.
-	await getSession(state).catch((err) => console.warn("[Bridge] session open failed:", err));
+	// Sessions open lazily on the first browser call: maintenance clients (status, debug,
+	// reload, allow) never touch tabs and must not leave session records behind.
 	console.log(`[Bridge] client ${msg.clientId} (${state.name}) connected as ${state.sessionKey}`);
 }
 
@@ -340,10 +340,6 @@ function onHostMessage(message: HostToExt): void {
 					await time("debugger.getTargets", async () => {
 						timings.targetCount = (await chrome.debugger.getTargets()).length;
 					});
-					await time("session.open", async () => {
-						const s = await BrowserSession.open(`bench-${Date.now()}`, "bench");
-						await s.close();
-					});
 					send({ type: "response", clientId: message.clientId, id: message.id, result: timings });
 				})();
 				return;
@@ -413,8 +409,22 @@ function connect(): void {
 	});
 }
 
+/**
+ * Bridge sessions that own no tabs carry nothing worth keeping; a reload of the extension
+ * can leave such records behind (their clients were disconnected by the reload itself).
+ */
+async function dropEmptyBridgeSessions(): Promise<void> {
+	for (const s of await listSessions()) {
+		if (s.id.startsWith("bridge-") && s.tabIds.length === 0) {
+			const session = await BrowserSession.open(s.id, s.label, s.windowId);
+			await session.close();
+		}
+	}
+}
+
 /** Wire the bridge into the service worker. Safe to call on every worker start. */
 export function startBridge(): void {
+	dropEmptyBridgeSessions().catch(() => undefined);
 	// Injected code has no runtime providers in the worker; echo so callers can probe the shim.
 	setCdpMessageHandler(async (message) => ({ echo: message }));
 	chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
