@@ -22,6 +22,26 @@ startBridge();
 
 const panelEnabledCache = new Map<number, boolean>();
 const PANEL_BUSY_PREFIX = "sidepanel_busy_";
+const PANEL_TRACE_KEY = "sidepanel_trace";
+let panelTrace: string[] = [];
+let traceFlush: ReturnType<typeof setTimeout> | undefined;
+
+/** Timestamped log of panel-related events, readable through `sitegeist debug`. */
+function panelLog(line: string): void {
+	panelTrace.push(`${new Date().toISOString().slice(11, 23)} ${line}`);
+	if (panelTrace.length > 120) panelTrace = panelTrace.slice(-120);
+	if (!traceFlush) {
+		traceFlush = setTimeout(() => {
+			traceFlush = undefined;
+			chrome.storage.session.set({ [PANEL_TRACE_KEY]: panelTrace }).catch(() => undefined);
+		}, 150);
+	}
+}
+chrome.storage.session.get(PANEL_TRACE_KEY).then((d) => {
+	const saved = d[PANEL_TRACE_KEY] as string[] | undefined;
+	if (saved?.length) panelTrace = [...saved, ...panelTrace].slice(-120);
+	panelLog("worker started");
+});
 
 /** True while the panel's agent in this window is mid-run; the panel must not be torn down then. */
 async function panelBusy(windowId: number): Promise<boolean> {
@@ -45,8 +65,10 @@ async function setPanelEnabled(tabId: number, enabled: boolean): Promise<void> {
 	try {
 		// A tab-specific option must carry the path, or Chrome has no panel to open there.
 		await chrome.sidePanel.setOptions({ tabId, path: PANEL_PATH, enabled });
-	} catch {
+		panelLog(`setOptions tab=${tabId} enabled=${enabled}`);
+	} catch (err) {
 		panelEnabledCache.delete(tabId);
+		panelLog(`setOptions tab=${tabId} enabled=${enabled} FAILED ${err instanceof Error ? err.message : String(err)}`);
 	}
 }
 
@@ -68,6 +90,7 @@ async function syncPanelForWindow(windowId: number): Promise<void> {
 	// the agent works the panel stays available everywhere in the window; once it is idle
 	// the panel is confined to its own tabs again.
 	const owned = (await panelBusy(windowId)) ? null : await ownedTabsForWindow(windowId);
+	panelLog(`sync window=${windowId} owned=${owned ? [...owned].join(",") : "all"} tabs=${tabs.length}`);
 	for (const tab of tabs) {
 		if (tab.id === undefined) continue;
 		await setPanelEnabled(tab.id, owned === null ? true : owned.has(tab.id));
@@ -80,6 +103,7 @@ async function syncPanelForWindow(windowId: number): Promise<void> {
  * applies the two calls in order.
  */
 function enablePanelForTab(tabId: number): void {
+	panelLog(`enable+open tab=${tabId}`);
 	panelEnabledCache.set(tabId, true);
 	chrome.sidePanel
 		.setOptions({ tabId, path: PANEL_PATH, enabled: true })
@@ -91,7 +115,10 @@ async function syncAllPanels(): Promise<void> {
 	for (const w of windows) if (w.id !== undefined) await syncPanelForWindow(w.id);
 }
 
-chrome.tabs.onActivated.addListener((info) => void syncPanelForWindow(info.windowId));
+chrome.tabs.onActivated.addListener((info) => {
+	panelLog(`tab activated tab=${info.tabId} window=${info.windowId}`);
+	void syncPanelForWindow(info.windowId);
+});
 chrome.tabs.onCreated.addListener((tab) => void syncPanelForWindow(tab.windowId));
 chrome.tabs.onRemoved.addListener((tabId) => panelEnabledCache.delete(tabId));
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -148,6 +175,7 @@ chrome.runtime.onConnect.addListener((port: chrome.runtime.Port) => {
 	if (!match) return;
 
 	const windowId = Number(match[1]);
+	panelLog(`panel port connected window=${windowId}`);
 
 	// Update cache synchronously
 	openSidepanels.add(windowId);
@@ -207,6 +235,7 @@ chrome.runtime.onConnect.addListener((port: chrome.runtime.Port) => {
 	});
 
 	port.onDisconnect.addListener(() => {
+		panelLog(`panel port disconnected window=${windowId}`);
 		closeSidepanel(windowId, false);
 	});
 });
@@ -243,6 +272,7 @@ chrome.commands.onCommand.addListener((command: string, sender?: chrome.tabs.Tab
 
 function closeSidepanel(windowId: number, callCloseOnSidePanelAPI: boolean = true) {
 	if (callCloseOnSidePanelAPI) {
+		panelLog(`sidePanel.close window=${windowId} (toggle)`);
 		(chrome.sidePanel as any).close({ windowId });
 	}
 

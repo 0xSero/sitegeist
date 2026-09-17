@@ -268,7 +268,7 @@ function onHostMessage(message: HostToExt): void {
 				Promise.all([
 					listSessions(),
 					chrome.permissions.getAll(),
-					chrome.storage.session.get(["sidepanel_last_error", "sidepanel_open_windows"]),
+					chrome.storage.session.get(["sidepanel_last_error", "sidepanel_open_windows", "sidepanel_trace"]),
 					chrome.tabGroups
 						.query({})
 						.then((groups) =>
