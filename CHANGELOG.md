@@ -14,6 +14,7 @@
 - Removed upstream working notes from the repository root (`db.md`, `gmail.md`, `plan.md`).
 
 ### Fixed
+- `userScripts` is now an optional permission requested from the side panel's Grant button (Chrome 138+), so the "Allow User Scripts" toggle is no longer required.
 - Type errors in `CustomProviderEditDialog` (missing i18n keys) and `CustomProvidersTab` (`remove` shadowed `HTMLElement.remove`).
 - Manifest: fixed extension `key` (stable id `bbkgpflnkggdfabgjhofdmdopgjopamc`), new permissions `tabGroups`, `nativeMessaging`, `alarms`.
 

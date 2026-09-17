@@ -35,13 +35,15 @@
 		"activeTab",
 		"scripting",
 		"sidePanel",
-		"userScripts",
 		"webNavigation",
 		"debugger",
 		"declarativeNetRequest",
 		"tabGroups",
 		"nativeMessaging",
 		"alarms"
+	],
+	"optional_permissions": [
+		"userScripts"
 	],
 	"host_permissions": [
 		"http://*/*",

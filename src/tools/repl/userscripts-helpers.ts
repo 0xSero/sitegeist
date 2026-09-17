@@ -58,6 +58,29 @@ export async function requestUserScriptsPermission(): Promise<{
 		}
 	}
 
+	// Chrome 138+: userScripts is an optional permission that can be granted from a
+	// user gesture; no "Allow User Scripts" toggle needed. The request must be the
+	// first call after the click (no await before it) to keep the gesture context.
+	if (isChrome && chromeVersion >= 138 && chrome.permissions) {
+		try {
+			const granted = await chrome.permissions.request({ permissions: ["userScripts"] });
+			if (granted) {
+				// The API namespace appears in freshly created contexts; reload this page.
+				setTimeout(() => window.location.reload(), 300);
+				return { granted: true, message: "Permission granted. Reloading..." };
+			}
+			return {
+				granted: false,
+				message: `Permission was not granted. You can also enable it manually: chrome://extensions/ > this extension > Details > 'Allow User Scripts', then reload the side panel.`,
+			};
+		} catch (error) {
+			return {
+				granted: false,
+				message: `Failed to request permission: ${error}. Fallback: chrome://extensions/ > this extension > Details > 'Allow User Scripts', then reload the side panel.`,
+			};
+		}
+	}
+
 	// Chrome: userScripts not available
 	if (isChrome) {
 		if (chromeVersion >= 138) {
@@ -98,11 +121,9 @@ export async function checkUserScriptsAvailability(): Promise<UserScriptsCheckRe
 	let errorMessage = "Error: browser.userScripts API is not available.\n\n";
 
 	if (chromeVersion >= 138) {
-		errorMessage += `Chrome ${chromeVersion} detected. To enable User Scripts:\n\n`;
-		errorMessage += "1. Go to chrome://extensions/\n";
-		errorMessage += "2. Find this extension and click 'Details'\n";
-		errorMessage += "3. Enable the 'Allow User Scripts' toggle\n";
-		errorMessage += "4. Refresh the page and try again";
+		errorMessage += `Chrome ${chromeVersion} detected. Grant the JavaScript execution permission when the side panel asks for it (reopen the side panel to see the prompt).\n`;
+		errorMessage +=
+			"Manual alternative: chrome://extensions/ > this extension > Details > enable 'Allow User Scripts', then reload the side panel.";
 	} else if (chromeVersion >= 120) {
 		errorMessage += `Chrome ${chromeVersion} detected. To enable User Scripts:\n\n`;
 		errorMessage += "1. Go to chrome://extensions/\n";

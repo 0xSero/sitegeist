@@ -28,9 +28,10 @@ This fork (0xSero/sitegeist) adds three things to upstream (badlogic/sitegeist):
 1. Download or build (`npm run build`) the unpacked extension in `dist-chrome/`.
 2. Open `chrome://extensions` (or `brave://extensions`), enable Developer mode, click
    Load unpacked, select `dist-chrome/`.
-3. In the extension's details enable **Allow user scripts** (needed by the side panel's
-   in-page JavaScript) and optionally **Allow access to file URLs**.
-4. Open the side panel with `Cmd+Shift+S` / `Ctrl+Shift+S` and connect a provider.
+3. Open the side panel with `Cmd+Shift+S` / `Ctrl+Shift+S`. It asks once for the
+   JavaScript execution permission (the `userScripts` API); click Grant. No extensions-page
+   toggle is needed on Chrome 138+. Optionally enable **Allow access to file URLs**.
+4. Connect a provider.
 
 Requires Chrome 141+ or the equivalent Chromium release.
 
