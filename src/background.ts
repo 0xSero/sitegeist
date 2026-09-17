@@ -60,10 +60,14 @@ async function syncPanelForWindow(windowId: number): Promise<void> {
 	}
 }
 
-/** Make the panel available on a tab the user is deliberately opening it on. */
-async function enablePanelForTab(tabId: number): Promise<void> {
+/**
+ * Make the panel available on a tab the user is deliberately opening it on. Not awaited
+ * by callers: sidePanel.open must run in the same tick as the user gesture, and Chrome
+ * applies the two calls in order.
+ */
+function enablePanelForTab(tabId: number): void {
 	panelEnabledCache.set(tabId, true);
-	await chrome.sidePanel.setOptions({ tabId, enabled: true }).catch(() => undefined);
+	chrome.sidePanel.setOptions({ tabId, enabled: true }).catch(() => undefined);
 }
 
 async function syncAllPanels(): Promise<void> {
@@ -86,7 +90,8 @@ chrome.action.onClicked.addListener((tab: chrome.tabs.Tab) => {
 	const tabId = tab?.id;
 	if (tabId && chrome.sidePanel.open) {
 		// The tab may be outside the current session's group; opening here adopts it.
-		enablePanelForTab(tabId).then(() => chrome.sidePanel.open({ tabId }));
+		enablePanelForTab(tabId);
+		chrome.sidePanel.open({ tabId }).catch((err) => console.warn("[Background] sidePanel.open failed:", err));
 	}
 });
 
@@ -214,7 +219,8 @@ chrome.commands.onCommand.addListener((command: string, sender?: chrome.tabs.Tab
 		} else if (sender?.id !== undefined) {
 			// Sidepanel is closed - open it on this tab (enabling it there if it was outside the group)
 			const tabId = sender.id;
-			enablePanelForTab(tabId).then(() => chrome.sidePanel.open({ tabId }));
+			enablePanelForTab(tabId);
+			chrome.sidePanel.open({ tabId }).catch((err) => console.warn("[Background] sidePanel.open failed:", err));
 		} else {
 			chrome.sidePanel.open({ windowId });
 		}
