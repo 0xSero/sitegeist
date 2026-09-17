@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { BridgeClient, listSockets } from "./client.ts";
 import { runNativeHost } from "./host.ts";
 import { install, isInstalled } from "./install.ts";
@@ -89,6 +92,13 @@ async function main(): Promise<void> {
 			return;
 		}
 		case "reload": {
+			// Refuse to reload onto a broken bundle: a half-written dist-chrome unloads the extension.
+			const dist = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "dist-chrome");
+			const required = ["manifest.json", "background.js", "sidepanel.js", "sidepanel.html", "app.css"];
+			const missing = required.filter((f) => !existsSync(join(dist, f)));
+			if (existsSync(dist) && missing.length > 0) {
+				throw new Error(`dist-chrome is incomplete (missing ${missing.join(", ")}); run \`npm run build\` first`);
+			}
 			const client = new BridgeClient({ name: "reload" });
 			await client.connect();
 			console.log(JSON.stringify(await client.call("bridge.reload", {}, 5000)));

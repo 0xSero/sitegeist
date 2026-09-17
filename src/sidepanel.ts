@@ -49,7 +49,7 @@ import {
 import { registerUserMessageRenderer } from "./messages/UserMessageRenderer.js";
 import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
 import { refreshDiscoveredModels } from "./models/registry.js";
-import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
+import { resolveApiKey } from "./oauth/index.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { Recorder } from "./recording/recorder.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
@@ -125,9 +125,6 @@ const shownSkills = new Map<string, string>();
 // Track which messages we've already recorded costs for (avoid duplicates)
 // Use Set with message object identity (not cleared on session switch - persists in memory)
 const recordedCostMessages = new Set<AgentMessage>();
-
-// Cached auth type label for the current provider
-let authLabel = "";
 
 // Interaction recorder (record → save as site-scoped skill)
 let recorder: Recorder | undefined;
@@ -296,7 +293,6 @@ async function selectDefaultModelForAvailableProvider() {
 			if (model) {
 				agent.setModel(model);
 				await storage.settings.set("lastUsedModel", model);
-				await updateAuthLabel();
 				renderApp();
 				return;
 			}
@@ -309,7 +305,6 @@ async function selectDefaultModelForAvailableProvider() {
 		if (models.length > 0) {
 			agent.setModel(models[0]);
 			await storage.settings.set("lastUsedModel", models[0]);
-			await updateAuthLabel();
 			renderApp();
 			return;
 		}
@@ -322,7 +317,6 @@ async function selectDefaultModelForAvailableProvider() {
 		if (model) {
 			agent.setModel(model);
 			await storage.settings.set("lastUsedModel", model);
-			await updateAuthLabel();
 			renderApp();
 			return;
 		}
@@ -359,22 +353,6 @@ function openApiKeysDialog(): Promise<void> {
 			resolve,
 		);
 	});
-}
-
-async function updateAuthLabel() {
-	if (!agent) {
-		authLabel = "";
-		return;
-	}
-	const provider = agent.state.model.provider;
-	const stored = await storage.providerKeys.get(provider);
-	if (!stored) {
-		authLabel = "";
-	} else if (isOAuthCredentials(stored)) {
-		authLabel = "subscription";
-	} else {
-		authLabel = "api key";
-	}
 }
 
 // Export getter for message transformer
@@ -579,8 +557,6 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 		},
 	});
 
-	await updateAuthLabel();
-
 	if (shouldSave) {
 		agentUnsubscribe = agent.subscribe((event: AgentEvent) => {
 			const messages = agent.state.messages;
@@ -588,9 +564,6 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			storage.settings
 				.set("lastUsedModel", agent.state.model)
 				.catch((err) => console.error("Failed to save lastUsedModel:", err));
-
-			// Update auth label when model changes
-			updateAuthLabel().catch(() => {});
 
 			if (
 				event.type === "message_end" &&
@@ -663,7 +636,6 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 				(model) => {
 					agent.setModel(model);
 					chatPanel.agentInterface?.requestUpdate();
-					updateAuthLabel().catch(() => {});
 					renderApp();
 				},
 				providers,
@@ -767,6 +739,22 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 		chatPanel.agentInterface.enableThinkingSelector = false;
 		// "/" in the chat input lists skills (recordings included) for the site.
 		chatPanel.agentInterface.slashCommandProvider = buildSkillSlashProvider();
+		// ArrowUp in an empty composer recalls the last prompt for editing or resending.
+		chatPanel.agentInterface.historyProvider = () => {
+			for (let i = agent.state.messages.length - 1; i >= 0; i--) {
+				const m = agent.state.messages[i];
+				if (m.role !== "user") continue;
+				const text =
+					typeof m.content === "string"
+						? m.content
+						: m.content
+								.filter((c) => c.type === "text")
+								.map((c) => c.text)
+								.join("\n");
+				if (text.trim()) return text;
+			}
+			return undefined;
+		};
 		chatPanel.agentInterface.requestUpdate();
 
 		// Only disable auto-scroll for new sessions with welcome message
@@ -894,7 +882,6 @@ const renderApp = () => {
 					}
 				</div>
 				<div class="flex items-center gap-1 px-2">
-					${agent ? html`<span class="text-[10px] text-muted-foreground truncate max-w-[120px]" title="${agent.state.model.provider}/${agent.state.model.id}${authLabel ? ` (${authLabel})` : ""}">${agent.state.model.provider}${authLabel ? html` <span class="text-[9px] opacity-70">${authLabel}</span>` : ""}</span>` : ""}
 					${Button({
 						variant: "ghost",
 						size: "sm",

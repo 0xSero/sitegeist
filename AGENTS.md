@@ -88,6 +88,6 @@ cli/
 ```
 
 ## Bridge development
-- After changing `src/`, rebuild with `npm run build` (or the dev watcher) and run `sitegeist reload` to reload the extension from the terminal.
+- After changing `src/`, rebuild and reload with `npm run build && sitegeist reload` (always `&&`: a reload after a failed build unloads the extension until it is reloaded from the extensions page).
 - `sitegeist debug` prints the extension's bridge state, request timings, and a Chrome API benchmark.
 - The CLI is a separate package: `cd cli && npm run check`.

@@ -172,6 +172,10 @@ export function getGeneratedModels(provider: string): Model<Api>[] {
 }
 ```
 
+The composer tweaks (ArrowUp prompt recall via `historyProvider`, plain model-id button,
+arrow send button) live in `../pi-mono/packages/web-ui/src/components/MessageEditor.ts`
+and `AgentInterface.ts`; the sitegeist side only sets `agentInterface.historyProvider`.
+
 Without the watchers, build the sibling declarations once so type checking resolves:
 
 ```bash
