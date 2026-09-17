@@ -146,7 +146,23 @@ function sessionLabel(): string {
 async function openBrowserSession(id: string): Promise<void> {
 	browserSession = await BrowserSession.open(id, sessionLabel(), currentWindowId);
 	setCurrentBrowserSession(browserSession);
+	// The tab the panel was opened on becomes the session's first tab, so the tab group
+	// exists from the start and the agent has a page to work with.
+	if (browserSession.tabIds.length === 0) await adoptActiveTab(false);
 	renderApp();
+}
+
+/** Move the window's active tab into the session (quietly on startup, with a toast on request). */
+async function adoptActiveTab(notify: boolean): Promise<void> {
+	if (!browserSession) return;
+	const [tab] = await chrome.tabs.query({ active: true, windowId: currentWindowId });
+	if (!tab?.id || !tab.url || isRestrictedUrl(tab.url)) {
+		if (notify) Toast.error("This page cannot be shared with the agent");
+		return;
+	}
+	if (browserSession.tabIds.includes(tab.id)) return;
+	await browserSession.adopt(tab.id, true);
+	if (notify) Toast.success("Tab shared with the agent");
 }
 
 /** Unsaved chats get a throwaway session id until they are persisted. */
@@ -167,14 +183,7 @@ async function pruneEmptyTempSessions(): Promise<void> {
 
 /** User gesture: hand the tab they are looking at to the agent. */
 async function shareActiveTab(): Promise<void> {
-	if (!browserSession) return;
-	const [tab] = await chrome.tabs.query({ active: true, windowId: currentWindowId });
-	if (!tab?.id || !tab.url || isRestrictedUrl(tab.url)) {
-		Toast.error("This page cannot be shared with the agent");
-		return;
-	}
-	await browserSession.adopt(tab.id, true);
-	Toast.success("Tab shared with the agent");
+	await adoptActiveTab(true);
 	renderApp();
 }
 

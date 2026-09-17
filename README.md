@@ -96,8 +96,9 @@ Extension:
   `navigate` (new `showTab`, `closeTab`, `back`/`forward`; `switchToTab` no longer
   focuses), `browserjs()`, native input events, debugger, skills, element picker,
   `extract_image` (CDP screenshot instead of `captureVisibleTab`).
-- The side panel only reacts to URL changes on its own tab. A link icon in the header
-  shares the tab you are viewing with the agent.
+- Opening the side panel puts the tab you opened it on into the session's tab group
+  right away, so the group exists from the start. The side panel only reacts to URL
+  changes on its own tabs. A link icon in the header shares further tabs with the agent.
 - `src/models/`: runtime model discovery for Anthropic, OpenAI, ChatGPT/Codex, Gemini,
   GitHub Copilot, OpenRouter, Mistral, Groq, xAI, Cerebras, Hugging Face; metadata from
   the generated table and models.dev; cached in IndexedDB (`discovered-models` store).
