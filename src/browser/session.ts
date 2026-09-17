@@ -44,6 +44,8 @@ interface PersistedSession {
 	groupId?: number;
 	tabIds: number[];
 	currentTabId?: number;
+	/** The tab the panel that owns this session was opened on (Claude-style per-tab binding). */
+	homeTabId?: number;
 }
 
 type SessionTable = Record<string, PersistedSession>;
@@ -88,6 +90,12 @@ export async function sessionOwningTab(tabId: number): Promise<PersistedSession 
 /** Summaries of all sessions, for UI. */
 export async function listSessions(): Promise<PersistedSession[]> {
 	return Object.values(await readTable());
+}
+
+/** The id of the session whose home tab is `tabId`, if any. */
+export async function sessionIdForTab(tabId: number): Promise<string | undefined> {
+	const table = await readTable();
+	return Object.values(table).find((s) => s.homeTabId === tabId)?.id;
 }
 
 /**
@@ -173,6 +181,29 @@ export class BrowserSession {
 		return this.state.currentTabId;
 	}
 
+	get homeTabId(): number | undefined {
+		return this.state.homeTabId;
+	}
+
+	/**
+	 * Bind this session to the tab its panel lives on, so reopening the panel there restores
+	 * it. Exclusive: any other session that claimed this tab as its home tab gives it up, so a
+	 * tab maps to exactly one task (e.g. after "New chat" rebinds the tab to a fresh session).
+	 */
+	async setHomeTab(tabId: number): Promise<void> {
+		const table = await readTable();
+		for (const s of Object.values(table)) {
+			if (s.id !== this.state.id && s.homeTabId === tabId) {
+				s.homeTabId = undefined;
+				const other = instances.get(s.id);
+				if (other) other.state.homeTabId = undefined;
+			}
+		}
+		this.state.homeTabId = tabId;
+		table[this.state.id] = this.state;
+		await writeTable(table);
+	}
+
 	/**
 	 * Open (or re-adopt) a session. `windowId` is where new tabs go; for the sidepanel
 	 * that is its own window, for the bridge the last focused normal window.
@@ -236,6 +267,9 @@ export class BrowserSession {
 		this.state.tabIds = alive;
 		if (this.state.currentTabId !== undefined && !alive.includes(this.state.currentTabId)) {
 			this.state.currentTabId = alive[alive.length - 1];
+		}
+		if (this.state.homeTabId !== undefined && !(await tabExists(this.state.homeTabId))) {
+			this.state.homeTabId = undefined;
 		}
 		if (this.state.groupId !== undefined) {
 			try {

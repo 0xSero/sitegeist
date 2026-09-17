@@ -26,7 +26,7 @@ import { Circle, Download, History, Link, Plus, Settings, Square } from "lucide"
 import { isRestrictedUrl } from "./browser/cdp.js";
 import { setCurrentBrowserSession } from "./browser/current.js";
 import { dispatchToSandbox, setCdpMessageHandler } from "./browser/inject.js";
-import { BrowserSession, listSessions, releaseOtherPanelSessions } from "./browser/session.js";
+import { BrowserSession, listSessions, sessionIdForTab } from "./browser/session.js";
 import { Toast } from "./components/Toast.js";
 import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
@@ -145,7 +145,13 @@ window.addEventListener("pagehide", () => {
 
 // The tabs this chat session owns (its own tab group; never the user's tabs)
 let browserSession: BrowserSession | undefined;
-let tempBrowserSessionId: string | undefined;
+// The tab this panel is bound to (Claude-style per-tab binding), from ?tabId= in the URL.
+let homeTabId: number | undefined;
+
+/** Browser-session id for an unsaved chat: stable per home tab so reopening the tab restores it. */
+function unsavedSessionId(): string {
+	return homeTabId !== undefined ? `tab-${homeTabId}` : `temp-${crypto.randomUUID()}`;
+}
 
 function sessionLabel(): string {
 	const title = currentTitle.trim();
@@ -156,13 +162,13 @@ function sessionLabel(): string {
 async function openBrowserSession(id: string): Promise<void> {
 	browserSession = await BrowserSession.open(id, sessionLabel(), currentWindowId);
 	setCurrentBrowserSession(browserSession);
-	// Adopt the tab the panel was opened on BEFORE releasing any other session: the very
-	// first session-table write must already mark this tab owned, or the worker's sync can
-	// disable it (Chrome hides the panel when its active tab is disabled) and close the panel.
-	// The group then exists from the start and the agent has a page to work with.
-	await adoptActiveTab(false);
-	// Any other panel session left in this window gives its tabs back (ungrouped, still open).
-	await releaseOtherPanelSessions(currentWindowId, id);
+	// Bind this panel's tab to the session (exclusive) and put it in the task's group so the
+	// group exists from the start and the agent has a page to work with. The tab keeps showing
+	// this task's panel; other tabs are unaffected.
+	if (homeTabId !== undefined) {
+		await browserSession.setHomeTab(homeTabId);
+		await browserSession.adopt(homeTabId, true);
+	}
 	renderApp();
 }
 
@@ -181,30 +187,10 @@ async function adoptActiveTab(notify: boolean): Promise<void> {
 	if (notify) Toast.success("Tab shared with the agent");
 }
 
-/**
- * Unsaved chats get a throwaway session id until they are persisted. It is remembered
- * per window so a panel that Chrome tears down and recreates (hidden on a foreign tab,
- * shown again on an owned one) keeps its tab group.
- */
-async function ensureTempBrowserSessionId(): Promise<string> {
-	if (tempBrowserSessionId) return tempBrowserSessionId;
-	const key = `temp_browser_session_${currentWindowId}`;
-	const stored = await chrome.storage.local.get(key);
-	const existing = stored[key] as string | undefined;
-	tempBrowserSessionId = existing ?? `temp-${crypto.randomUUID()}`;
-	if (!existing) await chrome.storage.local.set({ [key]: tempBrowserSessionId });
-	return tempBrowserSessionId;
-}
-
-async function forgetTempBrowserSessionId(): Promise<void> {
-	await chrome.storage.local.remove(`temp_browser_session_${currentWindowId}`);
-	tempBrowserSessionId = undefined;
-}
-
-/** Temp sessions that never got a tab are noise; drop them at startup. */
-async function pruneEmptyTempSessions(): Promise<void> {
+/** Unsaved browser sessions that never got a tab are noise; drop them at startup. */
+async function pruneEmptyUnsavedSessions(): Promise<void> {
 	for (const s of await listSessions()) {
-		if (s.id.startsWith("temp-") && s.tabIds.length === 0) {
+		if ((s.id.startsWith("temp-") || s.id.startsWith("tab-")) && s.tabIds.length === 0) {
 			const session = await BrowserSession.open(s.id, s.label, s.windowId);
 			await session.close();
 		}
@@ -507,6 +493,7 @@ const saveSession = async () => {
 
 const updateUrl = (sessionId: string) => {
 	const url = new URL(window.location.href);
+	if (homeTabId !== undefined) url.searchParams.set("tabId", String(homeTabId));
 	url.searchParams.set("session", sessionId);
 	window.history.replaceState({}, "", url);
 };
@@ -530,7 +517,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 	shownSkills.clear();
 
 	// Every chat owns a browser session; unsaved chats use a temporary id until first save
-	await openBrowserSession(currentSessionId ?? (await ensureTempBrowserSessionId()));
+	await openBrowserSession(currentSessionId ?? unsavedSessionId());
 
 	// Load debugger mode setting
 	const stored = await chrome.storage.local.get("debuggerMode");
@@ -619,27 +606,14 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 
 			if (!currentSessionId && shouldSaveSession(messages)) {
 				currentSessionId = crypto.randomUUID();
-				if (tempBrowserSessionId) {
-					const tempId = tempBrowserSessionId;
-					const newId = currentSessionId;
-					forgetTempBrowserSessionId()
-						.then(() => BrowserSession.rename(tempId, newId))
-						.then(() => openBrowserSession(newId))
-						.catch((err) => console.error("Failed to rename browser session:", err));
-				}
-
-				port
-					.sendMessage({
-						type: "acquireLock",
-						sessionId: currentSessionId,
-						windowId: currentWindowId,
-					})
-					.then((lockResponse) => {
-						if (!lockResponse.success) {
-							console.warn("Failed to acquire lock for newly created session", currentSessionId);
-						}
-					});
-				updateUrl(currentSessionId);
+				// Rename the unsaved browser session (id "tab-<homeTab>") to the saved id, keeping
+				// its home-tab binding and tab group, so the panel stays bound to the same tab.
+				const unsavedId = unsavedSessionId();
+				const savedId = currentSessionId;
+				BrowserSession.rename(unsavedId, savedId)
+					.then(() => openBrowserSession(savedId))
+					.catch((err) => console.error("Failed to rename browser session:", err));
+				updateUrl(savedId);
 			}
 
 			if (currentSessionId) {
@@ -811,16 +785,19 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 };
 
 const loadSession = (sessionId: string) => {
-	// Navigation will disconnect port and auto-release locks
 	const url = new URL(window.location.href);
+	url.search = "";
+	if (homeTabId !== undefined) url.searchParams.set("tabId", String(homeTabId));
 	url.searchParams.set("session", sessionId);
 	window.location.href = url.toString();
 };
 
 const newSession = () => {
-	// Navigation will disconnect port and auto-release locks
+	// A new task on the same tab: keep the tabId, force a fresh session bound to it.
 	const url = new URL(window.location.href);
-	url.search = "?new=true";
+	url.search = "";
+	if (homeTabId !== undefined) url.searchParams.set("tabId", String(homeTabId));
+	url.searchParams.set("new", "true");
 	window.location.href = url.toString();
 };
 
@@ -1149,10 +1126,14 @@ async function initApp() {
 	}
 	currentWindowId = currentWindow.id;
 
-	// Initialize port communication system
+	// The tab this panel is bound to, from ?tabId= in the URL (background sets it per tab).
+	const homeTabParam = new URLSearchParams(window.location.search).get("tabId");
+	homeTabId = homeTabParam ? Number(homeTabParam) : undefined;
+
+	// Initialize port communication system (lifecycle only; background tracks open panels)
 	port.initialize(currentWindowId);
 
-	pruneEmptyTempSessions().catch(() => {});
+	pruneEmptyUnsavedSessions().catch(() => {});
 
 	// Register cached provider model lists now; refresh stale ones in the background.
 	refreshDiscoveredModels(storage).catch((err) => console.warn("Model discovery failed:", err));
@@ -1183,54 +1164,27 @@ async function initApp() {
 		return;
 	}
 
-	// Check for session in URL
+	// Which chat should this panel show?
+	//  - ?session=<id>  : explicit (a history-list click)
+	//  - ?new=true      : a fresh task on this tab (New chat)
+	//  - otherwise      : the task already bound to this tab, if any
 	const urlParams = new URLSearchParams(window.location.search);
 	let sessionIdFromUrl = urlParams.get("session");
 	const isNewSession = urlParams.get("new") === "true";
-	// An explicit new chat must not inherit the previous unsaved chat's tab group.
-	if (isNewSession || sessionIdFromUrl) await forgetTempBrowserSessionId();
 
-	// If no session in URL and not explicitly creating new, try to load the most recent session
-	if (!sessionIdFromUrl && !isNewSession && storage.sessions) {
-		const latestSessionId = await storage.sessions.getLatestSessionId();
-		if (latestSessionId) {
-			// Try to acquire lock for latest session
-			const lockResponse = await port.sendMessage({
-				type: "acquireLock",
-				sessionId: latestSessionId,
-				windowId: currentWindowId,
-			});
-
-			if (lockResponse.success) {
-				sessionIdFromUrl = latestSessionId;
-				// Update URL to include the latest session
-				updateUrl(latestSessionId);
-			}
-			// If lock fails, fall through to create new session
+	if (!sessionIdFromUrl && !isNewSession && homeTabId !== undefined && storage.sessions) {
+		const boundId = await sessionIdForTab(homeTabId);
+		// The tab's session id is the saved chat id once persisted; an unsaved one has no
+		// storage entry, so only restore ids the sessions store actually knows.
+		if (boundId && !boundId.startsWith("tab-") && !boundId.startsWith("temp-")) {
+			sessionIdFromUrl = boundId;
+			updateUrl(boundId);
 		}
 	}
 
 	if (sessionIdFromUrl && storage.sessions) {
 		const sessionData = await storage.sessions.loadSession(sessionIdFromUrl);
 		if (sessionData) {
-			// Try to acquire lock if we don't already have it (in case user navigated directly via URL)
-			const lockResponse = await port.sendMessage({
-				type: "acquireLock",
-				sessionId: sessionIdFromUrl,
-				windowId: currentWindowId,
-			});
-
-			if (!lockResponse.success) {
-				// Session is locked in another window - show landing page instead
-				await createAgent();
-				if (agent) {
-					const welcomeMessage = createWelcomeMessage(tutorials);
-					agent.appendMessage(welcomeMessage);
-				}
-				renderApp();
-				return;
-			}
-
 			currentSessionId = sessionIdFromUrl;
 			const metadata = await storage.sessions.getMetadata(sessionIdFromUrl);
 			currentTitle = metadata?.title || "";

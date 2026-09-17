@@ -6,7 +6,6 @@ import { formatUsage, getAppStorage, type SessionData, type SessionMetadata } fr
 import Fuse from "fuse.js";
 import { html } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import * as port from "../utils/port.js";
 
 type ExportedSession = {
 	session: SessionData;
@@ -17,8 +16,6 @@ type ExportedSession = {
 export class SitegeistSessionListDialog extends DialogBase {
 	@state() private sessions: SessionMetadata[] = [];
 	@state() private loading = true;
-	@state() private sessionLocks: Record<string, number> = {}; // sessionId -> windowId
-	@state() private currentWindowId: number | undefined;
 	@state() private searchQuery = "";
 	@state() private showDeleteMenu = false;
 
@@ -54,27 +51,18 @@ export class SitegeistSessionListDialog extends DialogBase {
 		dialog.onSelectCallback = onSelect;
 		dialog.onDeleteCallback = onDelete;
 		dialog.open();
-		await dialog.loadSessionsAndLocks();
+		await dialog.loadSessions();
 	}
 
-	private async loadSessionsAndLocks() {
+	private async loadSessions() {
 		this.loading = true;
 		try {
-			// Get current window ID
-			const currentWindow = await chrome.windows.getCurrent();
-			this.currentWindowId = currentWindow.id;
-
 			// Load sessions (already sorted by lastModified index)
 			const storage = getAppStorage();
 			this.sessions = await storage.sessions.getAllMetadata();
-
-			// Get lock information from background via port
-			const lockResponse = await port.sendMessage({ type: "getLockedSessions" });
-			this.sessionLocks = lockResponse.locks || {};
 		} catch (err) {
 			console.error("Failed to load sessions:", err);
 			this.sessions = [];
-			this.sessionLocks = {};
 		} finally {
 			this.loading = false;
 		}
@@ -92,7 +80,7 @@ export class SitegeistSessionListDialog extends DialogBase {
 			if (!storage.sessions) return;
 
 			await storage.sessions.deleteSession(sessionId);
-			await this.loadSessionsAndLocks();
+			await this.loadSessions();
 
 			// Track deleted session
 			this.deletedSessions.add(sessionId);
@@ -136,16 +124,6 @@ export class SitegeistSessionListDialog extends DialogBase {
 			return i18n("{days} days ago").replace("{days}", days.toString());
 		}
 		return date.toLocaleDateString();
-	}
-
-	private isSessionLocked(sessionId: string): boolean {
-		const lockWindowId = this.sessionLocks[sessionId];
-		return lockWindowId !== undefined && lockWindowId !== this.currentWindowId;
-	}
-
-	private isCurrentSession(sessionId: string): boolean {
-		const lockWindowId = this.sessionLocks[sessionId];
-		return lockWindowId !== undefined && lockWindowId === this.currentWindowId;
 	}
 
 	private async handleExport(sessionId?: string) {
@@ -241,7 +219,7 @@ export class SitegeistSessionListDialog extends DialogBase {
 				this.deletedSessions.add(session.id);
 			}
 
-			await this.loadSessionsAndLocks();
+			await this.loadSessions();
 		} catch (err) {
 			console.error("Failed to delete all sessions:", err);
 			alert(i18n("Failed to delete sessions. Check console for details."));
@@ -277,7 +255,7 @@ export class SitegeistSessionListDialog extends DialogBase {
 				this.deletedSessions.add(session.id);
 			}
 
-			await this.loadSessionsAndLocks();
+			await this.loadSessions();
 		} catch (err) {
 			console.error("Failed to delete old sessions:", err);
 			alert(i18n("Failed to delete sessions. Check console for details."));
@@ -368,7 +346,7 @@ export class SitegeistSessionListDialog extends DialogBase {
 						: i18n(`Imported {count} sessions`).replace("{count}", imported.toString());
 
 				alert(message);
-				await this.loadSessionsAndLocks();
+				await this.loadSessions();
 			};
 			input.click();
 		} catch (err) {
@@ -493,33 +471,16 @@ export class SitegeistSessionListDialog extends DialogBase {
 											${this.searchQuery ? "No matching sessions" : i18n("No sessions yet")}
 										</div>`
 									: filteredSessions.map((session) => {
-											const isLocked = this.isSessionLocked(session.id);
-											const isCurrent = this.isCurrentSession(session.id);
 											const cost = session.usage.cost.total;
 											return html`
 											<div
-												class="group flex items-start gap-3 p-4 rounded-lg border border-border ${
-													isLocked
-														? "opacity-50 cursor-not-allowed"
-														: "hover:bg-secondary/50 cursor-pointer"
-												} ${isCurrent ? "bg-secondary/30 border-primary/30" : ""} transition-colors"
-												@click=${() => !isLocked && this.handleSelect(session.id)}
+												class="group flex items-start gap-3 p-4 rounded-lg border border-border hover:bg-secondary/50 cursor-pointer transition-colors"
+												@click=${() => this.handleSelect(session.id)}
 											>
 												<div class="flex-1 min-w-0">
-													<!-- Title and badges -->
+													<!-- Title -->
 													<div class="flex items-center gap-2 mb-2">
 														<div class="font-semibold text-foreground truncate">${session.title}</div>
-														${
-															isCurrent
-																? html`<span class="px-2 py-0.5 text-xs rounded-full bg-primary/20 text-primary font-medium shrink-0">
-																	${i18n("Current")}
-																</span>`
-																: isLocked
-																	? html`<span class="px-2 py-0.5 text-xs rounded-full bg-destructive/20 text-destructive font-medium shrink-0">
-																		${i18n("Locked")}
-																	</span>`
-																	: ""
-														}
 													</div>
 
 													<!-- Stats row -->

@@ -18,9 +18,13 @@ This fork (0xSero/sitegeist) adds three things to upstream (badlogic/sitegeist):
 
 1. **Background operation.** Every chat owns its own tab group. Tabs open inactive, the
    agent acts on its own current tab, and it never sees or touches your other tabs.
-2. **Dynamic model lists.** Models are fetched from the connected providers at runtime
+2. **Per-tab panels for parallel tasks.** The panel is bound to a tab, not a window (the
+   Claude-in-Chrome model): each task lives on the tab you opened it on, and a tab shows
+   the panel only when a task owns it. Run several tasks at once, one per tab, and put
+   two tabs in two windows to watch both side by side.
+3. **Dynamic model lists.** Models are fetched from the connected providers at runtime
    instead of a hardcoded table.
-3. **A harness bridge.** Claude Code, Codex, omp, pi, or any MCP client can drive the
+4. **A harness bridge.** Claude Code, Codex, omp, pi, or any MCP client can drive the
    browser through Sitegeist, in the background, with no configuration.
 
 ## Install the extension
