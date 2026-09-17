@@ -134,7 +134,7 @@ export async function runInPage<T = unknown>(tabId: number, code: string, worldI
 				target: { tabId },
 				world: "ISOLATED",
 				// biome-ignore lint/security/noGlobalEval: the code is our own snippet, run in an isolated world when userScripts is unavailable
-				func: (src: string) => (0, eval)(src) as unknown,
+				func: (src: string) => globalThis.eval(src) as unknown,
 				args: [wrapped],
 			});
 			return unwrap<T>(res?.result);
