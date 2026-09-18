@@ -17,8 +17,9 @@ await build({
 	format: "esm",
 	outdir: outDir,
 	banner: { js: "#!/usr/bin/env node" },
-	// Keep the MCP SDK external so its own dependency tree resolves normally.
-	external: ["@modelcontextprotocol/sdk", "zod"],
+	// Bundle everything (incl. the MCP SDK and zod) so the CLI is self-contained and runs
+	// from a global link or npx without a node_modules next to dist.
+	packages: "bundle",
 	sourcemap: true,
 	logLevel: "info",
 });
