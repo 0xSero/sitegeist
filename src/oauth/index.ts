@@ -16,16 +16,18 @@ import {
 	parseOAuthCredentials,
 	serializeOAuthCredentials,
 } from "./types.js";
+import { loginXai, refreshXai } from "./xai.js";
 
 export { isOAuthCredentials, type OAuthCredentials, parseOAuthCredentials, serializeOAuthCredentials };
 
-export type OAuthProviderId = "anthropic" | "openai-codex" | "github-copilot" | "google-gemini-cli";
+export type OAuthProviderId = "anthropic" | "openai-codex" | "github-copilot" | "google-gemini-cli" | "xai";
 
 const OAUTH_PROVIDERS: Record<OAuthProviderId, { name: string }> = {
 	anthropic: { name: "Anthropic (Claude Pro/Max)" },
 	"openai-codex": { name: "ChatGPT Plus/Pro" },
 	"github-copilot": { name: "GitHub Copilot" },
 	"google-gemini-cli": { name: "Google Gemini" },
+	xai: { name: "xAI Grok (SuperGrok / X Premium)" },
 };
 
 /**
@@ -43,7 +45,7 @@ export function getOAuthProviderName(provider: OAuthProviderId): string {
 }
 
 /**
- * Callback for device code flows (GitHub Copilot).
+ * Callback for device code flows (GitHub Copilot, xAI).
  * Called with the user code and verification URL that the user needs to enter.
  */
 export type DeviceCodeCallback = (info: { userCode: string; verificationUri: string }) => void;
@@ -66,6 +68,8 @@ export async function oauthLogin(
 			return loginGitHubCopilot(onDeviceCode || (() => {}));
 		case "google-gemini-cli":
 			return loginGeminiCli();
+		case "xai":
+			return loginXai(onDeviceCode || (() => {}));
 		default:
 			throw new Error(`Unknown OAuth provider: ${provider}`);
 	}
@@ -85,6 +89,8 @@ export async function oauthRefresh(credentials: OAuthCredentials, _proxyUrl?: st
 			return refreshGitHubCopilot(credentials);
 		case "google-gemini-cli":
 			return refreshGeminiCli(credentials);
+		case "xai":
+			return refreshXai(credentials);
 		default:
 			throw new Error(`Unknown OAuth provider: ${credentials.providerId}`);
 	}

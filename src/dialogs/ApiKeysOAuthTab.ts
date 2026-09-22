@@ -12,13 +12,14 @@ import {
 	serializeOAuthCredentials,
 } from "../oauth/index.js";
 
-const OAUTH_PROVIDERS: OAuthProviderId[] = ["anthropic", "openai-codex", "github-copilot", "google-gemini-cli"];
+const OAUTH_PROVIDERS: OAuthProviderId[] = ["anthropic", "openai-codex", "github-copilot", "google-gemini-cli", "xai"];
 
 const PROVIDER_KEY_MAP: Record<OAuthProviderId, string> = {
 	anthropic: "anthropic",
 	"openai-codex": "openai-codex",
 	"github-copilot": "github-copilot",
 	"google-gemini-cli": "google-gemini-cli",
+	xai: "xai",
 };
 
 // Providers to hide from the API key list (OAuth-only or irrelevant for browser use)

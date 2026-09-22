@@ -7,6 +7,7 @@
 - Screenshots and trusted input events go through `chrome.debugger` (works on hidden tabs; focus emulation keeps requestAnimationFrame and lazy loading alive off-screen).
 - Foreground guard: popups opened by agent tabs no longer steal focus.
 - Dynamic model discovery: provider model lists are fetched at runtime (Anthropic, OpenAI, ChatGPT/Codex, Gemini, GitHub Copilot, OpenRouter, Mistral, Groq, xAI, Cerebras, Hugging Face), enriched from the generated table and models.dev, cached in IndexedDB.
+- xAI Grok subscription login (SuperGrok / X Premium): device code flow against `auth.x.ai` in Settings > API Keys & OAuth. The token is stored under the `xai` provider and used as the Bearer token for `api.x.ai/v1`, so model discovery and chat use the existing xAI provider.
 - Bridge for external agents: `cli/` ships the `sitegeist` command (`sitegeist mcp`, `install`, `status`, `allow`, `reload`, `debug`, `pi-extension`). Harnesses reach the browser through a native messaging host and a user-only unix socket; each harness gets its own tab group. Settings > Bridge controls site permissions.
 
 ### Changed
