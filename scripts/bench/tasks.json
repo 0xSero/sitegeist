@@ -1,0 +1,26 @@
+[
+	{
+		"id": "hn",
+		"prompt": "Open https://news.ycombinator.com and report the titles of the top 3 stories exactly as shown, numbered 1-3."
+	},
+	{
+		"id": "wiki",
+		"prompt": "Open https://en.wikipedia.org/wiki/Copenhagen_Municipality and report the total population figure shown in the infobox, with the date it refers to."
+	},
+	{
+		"id": "form",
+		"prompt": "Go to https://httpbin.org/forms/post and fill the form: customer name 'Ada Lovelace', telephone '555-0100', email 'ada@example.com', pizza size Large, toppings bacon and onion, preferred delivery time 19:30, delivery instructions 'ring twice'. Submit it and report the JSON 'form' object the resulting page shows."
+	},
+	{
+		"id": "tabs",
+		"prompt": "Open https://www.python.org/downloads/ and https://nodejs.org/en in two separate tabs of your browser session. Report the latest Python release version shown on the Python downloads page and the Node.js LTS version shown on nodejs.org. Then close the Node.js tab and list the tabs you still have open."
+	},
+	{
+		"id": "shot",
+		"prompt": "Open https://example.com and take a screenshot. From the screenshot, report the page's main heading text and describe the background color and layout."
+	},
+	{
+		"id": "gh",
+		"prompt": "Open https://github.com/badlogic/pi-mono and report the repository's description and its star count as shown on the page."
+	}
+]

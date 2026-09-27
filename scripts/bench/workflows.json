@@ -1,0 +1,24 @@
+[
+	{
+		"id": "excalidraw",
+		"prompt": "Open http://127.0.0.1:8795/excalidraw3.html (an Excalidraw editor) and draw a small flowchart on the canvas: a rectangle labeled 'Start', an ellipse labeled 'End' to its right, and an arrow from the rectangle to the ellipse (connected to both shapes). Take a screenshot at the end to confirm the drawing, and describe what is on the canvas.",
+		"verify_js": "(()=>{const e=JSON.parse(sessionStorage.getItem('scene')||'[]');const by=Object.fromEntries(e.map(x=>[x.id,x]));const lab=x=>{const t=e.find(y=>y.containerId===x.id);return t?t.text:''};const rects=e.filter(x=>x.type==='rectangle').map(lab),ells=e.filter(x=>x.type==='ellipse').map(lab);const end=b=>b&&by[b.elementId]?by[b.elementId].type+':'+lab(by[b.elementId]):'free';const arrows=e.filter(x=>x.type==='arrow').map(x=>[end(x.startBinding),end(x.endBinding)]);const ok=rects.some(s=>/start/i.test(s))&&ells.some(s=>/end/i.test(s))&&arrows.some(a=>/rectangle:start/i.test(a[0])&&/ellipse:end/i.test(a[1]));return JSON.stringify({ok,rects,ells,arrows,n:e.length})})()"
+	},
+	{
+		"id": "tldraw",
+		"prompt": "Open http://127.0.0.1:8795/tldraw3.html (a tldraw editor) and draw a small flowchart on the canvas: a rectangle labeled 'Start', an ellipse labeled 'End' to its right, and an arrow from the rectangle to the ellipse (connected to both shapes). Take a screenshot at the end to confirm the drawing, and describe what is on the canvas.",
+		"verify_js": "(()=>{const d=JSON.parse(sessionStorage.getItem('scene')||'{\"shapes\":[],\"bindings\":[]}');const by=Object.fromEntries(d.shapes.map(s=>[s.id,s]));const txt=s=>{const r=s.props&&s.props.richText;return r?(JSON.stringify(r).match(/\"text\":\"([^\"]*)\"/g)||[]).map(m=>m.slice(8,-1)).join(' '):((s.props&&s.props.text)||'')};const geo=g=>d.shapes.filter(s=>s.type==='geo'&&s.props.geo===g).map(txt);const arrows=d.shapes.filter(s=>s.type==='arrow').map(a=>{const f=t=>{const b=d.bindings.find(x=>x.fromId===a.id&&x.props.terminal===t);const s=b&&by[b.toId];return s?(s.props.geo||s.type)+':'+txt(s):'free'};return [f('start'),f('end')]});const ok=geo('rectangle').some(s=>/start/i.test(s))&&geo('ellipse').some(s=>/end/i.test(s))&&arrows.some(a=>/rectangle:start/i.test(a[0])&&/ellipse:end/i.test(a[1]));return JSON.stringify({ok,rects:geo('rectangle'),ells:geo('ellipse'),arrows,n:d.shapes.length})})()"
+	},
+	{
+		"id": "releases",
+		"prompt": "Compare the latest stable releases of Rust, Go and Zig. Open each project's official release or download page in its own tab and keep all three tabs open while you compare. Report a table with the version number and release date for each. When done, close all but one of the tabs and list the tabs you still have open."
+	},
+	{
+		"id": "hn3",
+		"prompt": "Open the Hacker News front page. Open the articles of the top 3 stories each in its own tab, read them, and give a one-sentence summary of each (with its title). Then close those three article tabs and list the tabs you still have open."
+	},
+	{
+		"id": "cities",
+		"prompt": "Open the English Wikipedia articles for Paris, Berlin and Madrid, each in its own tab, and read the city population from each infobox. Then, in a fourth tab, open https://httpbin.org/forms/post, enter customer name 'sitegeist' and put 'Paris=<pop>; Berlin=<pop>; Madrid=<pop>' (with the numbers you found) into the delivery instructions field, submit, and report the 'comments' value the result page echoes. Finally close every tab except the result page and list your open tabs."
+	}
+]
