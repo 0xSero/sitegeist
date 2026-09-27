@@ -14,7 +14,54 @@ import { VERSION } from "./version.ts";
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 
 function text(value: unknown): Content[] {
-	return [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }];
+	return [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }];
+}
+
+interface SnapNode {
+	ref: string;
+	role: string;
+	name: string;
+	value?: string;
+	href?: string;
+	visible: boolean;
+}
+
+/** One line per element; same-origin links shortened to their path. */
+function formatNodes(nodes: SnapNode[], pageUrl: string): string {
+	let origin = "";
+	try {
+		origin = new URL(pageUrl).origin;
+	} catch {
+		/* no origin */
+	}
+	return nodes
+		.map((n) => {
+			let line = `${n.ref} ${n.role} ${JSON.stringify(n.name)}`;
+			if (n.value) line += ` value=${JSON.stringify(n.value)}`;
+			if (n.href) line += ` -> ${origin && n.href.startsWith(origin) ? n.href.slice(origin.length) || "/" : n.href}`;
+			if (!n.visible) line += " (offscreen)";
+			return line;
+		})
+		.join("\n");
+}
+
+/** read_page as compact text: a fraction of the tokens of pretty JSON, same information. */
+function formatSnapshot(snap: {
+	url: string;
+	title: string;
+	viewport: { width: number; height: number; scrollY: number; pageHeight: number };
+	nodes: SnapNode[];
+	text: string;
+}): string {
+	const v = snap.viewport;
+	const parts = [
+		`Page: ${snap.title} | ${snap.url}`,
+		`Viewport ${v.width}x${v.height}, scrollY ${v.scrollY} of ${v.pageHeight}`,
+		`Elements (${snap.nodes.length}; use the ref with click/type/fill/scroll):`,
+		formatNodes(snap.nodes, snap.url),
+	];
+	if (snap.text) parts.push("", "Text:", snap.text);
+	return parts.join("\n");
 }
 
 function harnessName(): string {
@@ -26,14 +73,19 @@ function harnessName(): string {
 	return "mcp";
 }
 
-function sessionKey(): string | undefined {
+/**
+ * The browser session this server drives. Always set: without one every reconnect
+ * (extension reload, worker restart) got a fresh session and lost its tabs. One MCP
+ * server process serves one harness session, so the process identity is the fallback.
+ */
+function sessionKey(): string {
 	return (
 		process.env.SITEGEIST_SESSION ||
 		process.env.CLAUDE_SESSION_ID ||
 		process.env.CODEX_THREAD_ID ||
 		process.env.OMP_SESSION_ID ||
 		process.env.PI_SESSION_ID ||
-		undefined
+		`p${process.pid}-${Date.now().toString(36)}`
 	);
 }
 
@@ -44,7 +96,21 @@ export async function runMcpServer(): Promise<void> {
 		process.stderr.write(`[sitegeist] installed native host manifest (${result.written.length} browser dir(s))\n`);
 	}
 
-	const server = new McpServer({ name: "sitegeist", version: VERSION });
+	const server = new McpServer(
+		{ name: "sitegeist", version: VERSION },
+		{
+			instructions: [
+				"sitegeist drives the user's real Chromium browser in the background.",
+				"You get your own tab group; your tabs never take focus and you cannot see the user's other tabs.",
+				"Workflow: navigate(url) -> read_page (refs) -> click/type/fill by ref -> read_page again to confirm.",
+				"For canvas apps and multi-step input, batch steps with actions (one call, screenshot at the end) instead of one tool call per key or drag.",
+				"Canvas editors (Excalidraw, tldraw, Figma-like): use the app's keyboard shortcuts and mouse drags, check the result on the screenshot, and do not reverse-engineer the app's internals with run_js.",
+				"Reuse your current tab for step-by-step browsing; tabs_create only when two pages must stay open.",
+				"Close tabs you no longer need with tabs_close. Prefer read_page/get_page_text over screenshots for reading.",
+				"Refs expire when the page changes; take a new read_page after navigation or big updates.",
+			].join(" "),
+		},
+	);
 	const client = new BridgeClient({
 		name: harnessName(),
 		session: sessionKey(),
@@ -91,13 +157,17 @@ export async function runMcpServer(): Promise<void> {
 		await client.call("permission.respond", { requestId, decision }).catch(() => undefined);
 	}
 
+	function errorResult(err: unknown): { content: Content[]; isError: true } {
+		const message = err instanceof BridgeRpcError ? `${err.rpc.code}: ${err.rpc.message}` : err instanceof Error ? err.message : String(err);
+		return { content: text(message), isError: true };
+	}
+
 	async function call(method: string, params: Record<string, unknown> = {}): Promise<{ content: Content[]; isError?: boolean }> {
 		try {
 			const result = await client.call(method, params);
 			return { content: text(result) };
 		} catch (err) {
-			const message = err instanceof BridgeRpcError ? `${err.rpc.code}: ${err.rpc.message}` : err instanceof Error ? err.message : String(err);
-			return { content: text(message), isError: true };
+			return errorResult(err);
 		}
 	}
 
@@ -107,14 +177,18 @@ export async function runMcpServer(): Promise<void> {
 		"tabs_context",
 		{
 			description:
-				"List the tabs this session owns (its own tab group, running in the background). Call first. A new session has no tabs until navigate or tabs_create.",
+				"List the tabs in your session's own tab group (background tabs, separate from the user's). A new session has none: navigate opens the first one.",
 			inputSchema: {},
 		},
 		() => call("tabs.context"),
 	);
 	server.registerTool(
 		"tabs_create",
-		{ description: "Open a new background tab in the session and make it current.", inputSchema: { url: z.string().url().optional() } },
+		{
+			description:
+				"Open a URL in an additional background tab in your group and make it current. Only for keeping a second page open; for normal browsing use navigate.",
+			inputSchema: { url: z.string().url() },
+		},
 		(args) => call("tabs.create", args),
 	);
 	server.registerTool(
@@ -138,7 +212,8 @@ export async function runMcpServer(): Promise<void> {
 	server.registerTool(
 		"navigate",
 		{
-			description: "Navigate the current tab to a URL, or 'back' / 'forward'. Waits for the page to load.",
+			description:
+				"Load a URL in your current tab (the first call opens your tab), or 'back' / 'forward'. Waits for the page; the result has tabId, url, title, and loading:true if it is still loading.",
 			inputSchema: {
 				url: z.string(),
 				tabId,
@@ -150,24 +225,37 @@ export async function runMcpServer(): Promise<void> {
 	server.registerTool(
 		"screenshot",
 		{
-			description: "Screenshot the current tab (works while it is hidden). Returns an image.",
+			description:
+				"JPEG screenshot of the current tab's viewport (works while it is hidden). For layout and visual checks; read_page / get_page_text are faster and cheaper for reading.",
 			inputSchema: {
 				tabId,
 				fullPage: z.boolean().optional(),
-				maxWidth: z.number().int().optional().describe("Downscale to this width (default 1200)"),
+				maxWidth: z
+					.number()
+					.int()
+					.optional()
+					.describe("Image width in pixels. Default: the viewport's CSS width (max 1280), so image x/y can be clicked directly"),
 			},
 		},
 		async (args) => {
 			try {
-				const shot = (await client.call("screenshot", args)) as { data: string; mimeType: string; width: number; height: number };
+				const shot = (await client.call("screenshot", args)) as {
+					data: string;
+					mimeType: string;
+					width: number;
+					height: number;
+					cssWidth?: number;
+					cssHeight?: number;
+				};
+				const note = "Give click/drag/hover/scroll x/y in this image's pixels; they are mapped to the page for you.";
 				return {
 					content: [
 						{ type: "image", data: shot.data, mimeType: shot.mimeType },
-						{ type: "text", text: `${shot.width}x${shot.height} screenshot` },
+						{ type: "text", text: `${shot.width}x${shot.height} screenshot. ${note}` },
 					],
 				};
 			} catch (err) {
-				return { content: text(err instanceof Error ? err.message : String(err)), isError: true };
+				return errorResult(err);
 			}
 		},
 	);
@@ -183,7 +271,14 @@ export async function runMcpServer(): Promise<void> {
 				maxTextChars: z.number().int().optional(),
 			},
 		},
-		(args) => call("snapshot", args),
+		async (args) => {
+			try {
+				const snap = (await client.call("snapshot", { ...args, maxTextChars: args.maxTextChars ?? 3000 })) as Parameters<typeof formatSnapshot>[0];
+				return { content: text(formatSnapshot(snap)) };
+			} catch (err) {
+				return errorResult(err);
+			}
+		},
 	);
 	server.registerTool(
 		"get_page_text",
@@ -201,19 +296,27 @@ export async function runMcpServer(): Promise<void> {
 			description: "Find elements by words in their role, label, value or href. Returns refs for click/type/fill.",
 			inputSchema: { query: z.string(), tabId, limit: z.number().int().optional() },
 		},
-		(args) => call("find", args),
+		async (args) => {
+			try {
+				const found = (await client.call("find", args)) as { matches: SnapNode[] };
+				if (found.matches.length === 0) return { content: text(`No elements match "${args.query}". Try read_page or other words.`) };
+				return { content: text(formatNodes(found.matches, "")) };
+			} catch (err) {
+				return errorResult(err);
+			}
+		},
 	);
 	const targetSchema = {
 		tabId,
 		ref: z.string().optional().describe("Element ref from read_page or find"),
 		selector: z.string().optional().describe("CSS selector"),
-		x: z.number().optional(),
-		y: z.number().optional(),
+		x: z.number().optional().describe("Pixel x in the latest screenshot"),
+		y: z.number().optional().describe("Pixel y in the latest screenshot"),
 	};
 	server.registerTool(
 		"click",
 		{
-			description: "Click an element (by ref, selector, or viewport x/y) with real input events.",
+			description: "Click an element by ref or selector, or at x/y pixels of the latest screenshot, with real input events.",
 			inputSchema: { ...targetSchema, button: z.enum(["left", "right", "middle"]).optional(), clickCount: z.number().int().optional() },
 		},
 		(args) => call("click", args),
@@ -261,10 +364,45 @@ export async function runMcpServer(): Promise<void> {
 	server.registerTool(
 		"drag",
 		{
-			description: "Drag from one viewport point to another.",
+			description: "Drag with the mouse between two points given in the latest screenshot's pixels (draw shapes, move items, connect arrows).",
 			inputSchema: { tabId, from: z.object({ x: z.number(), y: z.number() }), to: z.object({ x: z.number(), y: z.number() }) },
 		},
 		(args) => call("drag", args),
+	);
+	server.registerTool(
+		"actions",
+		{
+			description:
+				"Run several input steps in one call, then optionally screenshot. Best for canvas apps and forms: " +
+				'e.g. steps [{"press":"r"},{"drag":{"from":{"x":200,"y":200},"to":{"x":360,"y":300}}},{"press":"Enter"},{"type":"Start"},{"press":"Escape"}], screenshot true. ' +
+				"Step kinds: press (key or chord), click ({x,y} | {ref} | {selector}, optional clickCount), doubleClick ({x,y}), drag ({from,to}), type (text), hover ({x,y}|{ref}), scroll ({dx,dy}|{to}), wait (ms). " +
+				"x/y are pixels of the latest screenshot. Steps are spaced by settleMs (default 80) so the app can react. Stops at the first failing step.",
+			inputSchema: {
+				steps: z.array(z.record(z.string(), z.any())).min(1).max(40),
+				screenshot: z.boolean().optional().describe("Return a screenshot after the last step"),
+				settleMs: z.number().int().optional().describe("Pause between steps in ms (default 80)"),
+				tabId,
+			},
+		},
+		async (args) => {
+			try {
+				const res = (await client.call("actions", args)) as {
+					steps: number;
+					screenshot?: { data: string; mimeType: string; width: number; height: number };
+				};
+				const content: Content[] = [{ type: "text", text: `${res.steps} steps done.` }];
+				if (res.screenshot) {
+					content.unshift({ type: "image", data: res.screenshot.data, mimeType: res.screenshot.mimeType });
+					content.push({
+						type: "text",
+						text: `${res.screenshot.width}x${res.screenshot.height} screenshot. Give x/y in this image's pixels.`,
+					});
+				}
+				return { content };
+			} catch (err) {
+				return errorResult(err);
+			}
+		},
 	);
 	server.registerTool(
 		"run_js",

@@ -17,76 +17,115 @@ export interface NavigateOptions {
 	waitUntil?: "domcontentloaded" | "load";
 }
 
-/** Navigate a tab and wait for its top frame. Returns the final URL. */
+/**
+ * Navigate a tab and wait for its top frame. Returns the final URL.
+ *
+ * Only events after the new document commits count, so a load still finishing from the
+ * previous page cannot satisfy the wait. Same-document navigations (hash or pushState)
+ * finish at commit. Network errors reject with Chrome's error code. A page that keeps
+ * loading past the timeout resolves with where the tab is; callers report the tab's
+ * status so the model knows it may still be loading.
+ */
 export async function navigateTab(tabId: number, url: string, options: NavigateOptions = {}): Promise<string> {
-	const { signal, timeoutMs = 30000, waitUntil = "domcontentloaded" } = options;
+	return (await navigateTabDetailed(tabId, url, options)).url;
+}
+
+/** navigateTab that also says whether the wait ran out before the page was ready. */
+export async function navigateTabDetailed(
+	tabId: number,
+	url: string,
+	options: NavigateOptions = {},
+): Promise<{ url: string; timedOut: boolean }> {
+	const { signal, timeoutMs = 20000, waitUntil = "domcontentloaded" } = options;
 	if (signal?.aborted) throw new Error("Aborted");
-	const event = waitUntil === "load" ? chrome.webNavigation.onCompleted : chrome.webNavigation.onDOMContentLoaded;
-	return new Promise<string>((resolve, reject) => {
-		let settled = false;
+	return new Promise<{ url: string; timedOut: boolean }>((resolve, reject) => {
+		let committed = false;
+		const nav = chrome.webNavigation;
+		const doneEvent = waitUntil === "load" ? nav.onCompleted : nav.onDOMContentLoaded;
 		const cleanup = () => {
-			settled = true;
-			event.removeListener(listener);
+			nav.onCommitted.removeListener(onCommitted);
+			doneEvent.removeListener(onDone);
+			nav.onReferenceFragmentUpdated.removeListener(onSameDocument);
+			nav.onHistoryStateUpdated.removeListener(onSameDocument);
+			nav.onErrorOccurred.removeListener(onError);
 			signal?.removeEventListener("abort", onAbort);
 			clearTimeout(timer);
 		};
-		const listener = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
-			if (details.tabId === tabId && details.frameId === 0) {
-				cleanup();
-				resolve(details.url);
-			}
-		};
-		const onAbort = () => {
+		const finish = (fn: () => void) => {
 			cleanup();
-			reject(new Error("Aborted"));
+			fn();
 		};
-		const timer = setTimeout(async () => {
-			if (settled) return;
-			cleanup();
-			// Slow pages: report where the tab is instead of failing outright.
-			try {
-				const tab = await chrome.tabs.get(tabId);
-				resolve(tab.url ?? url);
-			} catch {
-				reject(new Error("Navigation timed out"));
-			}
+		const top = (d: { tabId: number; frameId: number }) => d.tabId === tabId && d.frameId === 0;
+		const onCommitted = (d: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => {
+			if (top(d)) committed = true;
+		};
+		const onDone = (d: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
+			if (top(d) && committed) finish(() => resolve({ url: d.url, timedOut: false }));
+		};
+		const onSameDocument = (d: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => {
+			if (top(d)) finish(() => resolve({ url: d.url, timedOut: false }));
+		};
+		const onError = (d: chrome.webNavigation.WebNavigationFramedErrorCallbackDetails) => {
+			// ERR_ABORTED is a superseded navigation (redirect to a download, a newer navigate).
+			if (top(d) && !d.error.includes("ERR_ABORTED"))
+				finish(() => reject(new Error(`Navigation to ${url} failed: ${d.error}`)));
+		};
+		const onAbort = () => finish(() => reject(new Error("Aborted")));
+		const timer = setTimeout(() => {
+			finish(() => {
+				chrome.tabs.get(tabId).then(
+					(tab) => resolve({ url: tab.url ?? tab.pendingUrl ?? url, timedOut: true }),
+					() => reject(new Error("Navigation timed out and the tab is gone")),
+				);
+			});
 		}, timeoutMs);
 		signal?.addEventListener("abort", onAbort);
-		event.addListener(listener);
-		chrome.tabs.update(tabId, { url }).catch((err: Error) => {
-			cleanup();
-			reject(err);
-		});
+		nav.onCommitted.addListener(onCommitted);
+		doneEvent.addListener(onDone);
+		nav.onReferenceFragmentUpdated.addListener(onSameDocument);
+		nav.onHistoryStateUpdated.addListener(onSameDocument);
+		nav.onErrorOccurred.addListener(onError);
+		chrome.tabs.update(tabId, { url }).catch((err: Error) => finish(() => reject(err)));
 	});
 }
 
-/** Wait for the top frame of a tab to finish its current load, bounded. */
-export function waitForLoad(tabId: number, timeoutMs = 15000): Promise<void> {
+/** Wait for the top frame of a tab to be ready (DOMContentLoaded), bounded. False on timeout. */
+export function waitForLoad(tabId: number, timeoutMs = 15000): Promise<boolean> {
 	return new Promise((resolve) => {
+		let ok = true;
 		const done = () => {
 			chrome.webNavigation.onCompleted.removeListener(listener);
+			chrome.webNavigation.onDOMContentLoaded.removeListener(listener);
 			clearTimeout(timer);
-			resolve();
+			resolve(ok);
 		};
 		const listener = (d: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
 			if (d.tabId === tabId && d.frameId === 0) done();
 		};
-		const timer = setTimeout(done, timeoutMs);
+		const timer = setTimeout(() => {
+			ok = false;
+			done();
+		}, timeoutMs);
 		chrome.webNavigation.onCompleted.addListener(listener);
-		chrome.tabs.get(tabId).then((tab) => {
-			if (tab.status === "complete") done();
-		});
+		// DOMContentLoaded is enough to read and act on a page; heavy sites take ages to "complete".
+		chrome.webNavigation.onDOMContentLoaded.addListener(listener);
+		chrome.tabs.get(tabId).then(
+			(tab) => {
+				if (tab.status === "complete" && !tab.pendingUrl) done();
+			},
+			() => done(),
+		);
 	});
 }
 
-export async function goBack(tabId: number): Promise<void> {
+export async function goBack(tabId: number): Promise<boolean> {
 	await chrome.tabs.goBack(tabId);
-	await waitForLoad(tabId);
+	return waitForLoad(tabId);
 }
 
-export async function goForward(tabId: number): Promise<void> {
+export async function goForward(tabId: number): Promise<boolean> {
 	await chrome.tabs.goForward(tabId);
-	await waitForLoad(tabId);
+	return waitForLoad(tabId);
 }
 
 interface UserScriptsApi {
@@ -266,10 +305,18 @@ function pageSnapshot(maxNodes: number, maxTextChars: number, filter: string): u
 		return (el.textContent ?? "").replace(/\s+/g, " ").trim() || (el.getAttribute("title") ?? "");
 	};
 	const nodes: unknown[] = [];
-	const all = Array.from(document.querySelectorAll(selector));
-	for (const el of all) {
-		if (nodes.length >= maxNodes) break;
+	// Elements in the viewport first, then the rest in document order: on long pages the
+	// cap used to be spent on navigation chrome above the fold and the content was cut.
+	const inView: Element[] = [];
+	const offView: Element[] = [];
+	for (const el of Array.from(document.querySelectorAll(selector))) {
 		if (!isVisible(el)) continue;
+		const r = el.getBoundingClientRect();
+		const onScreen = r.bottom > 0 && r.top < window.innerHeight && r.right > 0 && r.left < window.innerWidth;
+		(onScreen ? inView : offView).push(el);
+	}
+	for (const el of [...inView, ...offView]) {
+		if (nodes.length >= maxNodes) break;
 		const r = el.getBoundingClientRect();
 		const ref = `e${++seq}`;
 		refs.set(ref, el);

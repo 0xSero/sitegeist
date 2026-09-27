@@ -48,6 +48,20 @@ export function listSockets(): string[] {
 		.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
 }
 
+function isConnectionError(err: unknown): boolean {
+	const message = err instanceof Error ? err.message : String(err);
+	const code = (err as { code?: string } | undefined)?.code;
+	return (
+		message === "Bridge connection closed" ||
+		message === "Not connected" ||
+		message.startsWith("No sitegeist browser bridge") ||
+		code === "ECONNREFUSED" ||
+		code === "ENOENT" ||
+		code === "EPIPE" ||
+		code === "ECONNRESET"
+	);
+}
+
 export class BridgeClient {
 	private socket?: Socket;
 	private seq = 0;
@@ -127,7 +141,42 @@ export class BridgeClient {
 		}
 	}
 
+	/**
+	 * Call with one transparent retry when the bridge itself dropped (extension reload,
+	 * service worker restart, host respawn). The session key is stable, so the retry
+	 * lands on the same tabs. RPC errors from the extension are never retried.
+	 */
 	async call<T = unknown>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
+		try {
+			return await this.callOnce<T>(method, params, timeoutMs);
+		} catch (err) {
+			if (err instanceof BridgeRpcError || !isConnectionError(err)) throw err;
+			this.close();
+			await this.reconnect(40000);
+			return this.callOnce<T>(method, params, timeoutMs);
+		}
+	}
+
+	/** Wait for a live host socket (the browser respawns it after a reload) and dial it. */
+	private async reconnect(budgetMs: number): Promise<void> {
+		const deadline = Date.now() + budgetMs;
+		let lastError: unknown;
+		while (Date.now() < deadline) {
+			try {
+				await this.connect();
+				if (this.extensionConnected) return;
+				// Host is up but the extension has not said hello yet; give it a moment.
+				await new Promise((r) => setTimeout(r, 500));
+				if (this.extensionConnected) return;
+			} catch (err) {
+				lastError = err;
+			}
+			await new Promise((r) => setTimeout(r, 500));
+		}
+		if (!this.connected) throw lastError instanceof Error ? lastError : new Error("Bridge unavailable");
+	}
+
+	private async callOnce<T>(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<T> {
 		if (!this.connected) await this.connect();
 		const socket = this.socket;
 		if (!socket) throw new Error("Not connected");

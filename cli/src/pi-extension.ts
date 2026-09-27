@@ -23,6 +23,7 @@ const TOOLS: Array<{ name: string; method: string; description: string; params: 
 	{ name: "browser_press", method: "press", description: "Press a key or chord (Enter, Control+a, ...)", params: "{ key: Type.String(), tabId: Type.Optional(Type.Number()) }" },
 	{ name: "browser_fill", method: "fill", description: "Set a form control's value", params: "{ value: Type.String(), ref: Type.Optional(Type.String()), selector: Type.Optional(Type.String()), tabId: Type.Optional(Type.Number()) }" },
 	{ name: "browser_scroll", method: "scroll", description: "Scroll by dx/dy, to top/bottom, or to an element", params: "{ dx: Type.Optional(Type.Number()), dy: Type.Optional(Type.Number()), to: Type.Optional(Type.String()), ref: Type.Optional(Type.String()), selector: Type.Optional(Type.String()), tabId: Type.Optional(Type.Number()) }" },
+	{ name: "browser_actions", method: "actions", description: "Several input steps in one call (press/click/drag/type/hover/scroll/wait, x/y = latest screenshot pixels), optional screenshot at the end", params: "{ steps: Type.Array(Type.Record(Type.String(), Type.Any())), screenshot: Type.Optional(Type.Boolean()), tabId: Type.Optional(Type.Number()) }" },
 	{ name: "browser_js", method: "evaluate", description: "Run JavaScript in the page and return its JSON value", params: "{ code: Type.String(), world: Type.Optional(Type.String()), tabId: Type.Optional(Type.Number()) }" },
 	{ name: "browser_wait", method: "wait", description: "Wait for selector/text/url or ms", params: "{ selector: Type.Optional(Type.String()), text: Type.Optional(Type.String()), urlIncludes: Type.Optional(Type.String()), ms: Type.Optional(Type.Number()), timeoutMs: Type.Optional(Type.Number()), tabId: Type.Optional(Type.Number()) }" },
 	{ name: "browser_console", method: "console.read", description: "Console messages captured on the tab", params: "{ onlyErrors: Type.Optional(Type.Boolean()), pattern: Type.Optional(Type.String()), clear: Type.Optional(Type.Boolean()), tabId: Type.Optional(Type.Number()) }" },
@@ -51,6 +52,8 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
 const SOCKET_DIR = \`/tmp/sitegeist-bridge-\${userInfo().username}\`;
+// One key per pi process: a reconnect (extension reload) must land on the same tabs.
+const SESSION_FALLBACK = \`p\${process.pid}-\${Date.now().toString(36)}\`;
 
 function encode(message: unknown): Buffer {
 	const body = Buffer.from(JSON.stringify(message), "utf8");
@@ -96,7 +99,7 @@ class Bridge {
 				this.pending.clear();
 			});
 			this.socket = socket;
-			socket.write(encode({ type: "hello", client: { name: "pi", session: process.env.SITEGEIST_SESSION || process.env.PI_SESSION_ID } }));
+			socket.write(encode({ type: "hello", client: { name: "pi", session: process.env.SITEGEIST_SESSION || process.env.PI_SESSION_ID || SESSION_FALLBACK } }));
 		});
 	}
 
@@ -139,18 +142,24 @@ class Bridge {
 
 const bridge = new Bridge();
 
-function toResult(value: unknown) {
+function toResult(value: unknown): { content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; details: unknown } {
+	// actions: { steps, screenshot? } -> the screenshot as an image plus the step count
+	if (value && typeof value === "object" && "steps" in value && "screenshot" in value) {
+		const v = value as { steps: number; screenshot: unknown };
+		const shot = toResult(v.screenshot);
+		return { content: [...shot.content, { type: "text" as const, text: \`\${v.steps} steps done\` }], details: { steps: v.steps } };
+	}
 	if (value && typeof value === "object" && "data" in value && "mimeType" in value) {
 		const shot = value as { data: string; mimeType: string; width: number; height: number };
 		return {
 			content: [
 				{ type: "image" as const, data: shot.data, mimeType: shot.mimeType },
-				{ type: "text" as const, text: \`\${shot.width}x\${shot.height} screenshot\` },
+				{ type: "text" as const, text: \`\${shot.width}x\${shot.height} screenshot; give x/y in this image's pixels\` },
 			],
 			details: { width: shot.width, height: shot.height },
 		};
 	}
-	return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }], details: value };
+	return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value };
 }
 
 export default function sitegeistExtension(pi: ExtensionAPI) {

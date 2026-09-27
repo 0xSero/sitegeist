@@ -26,7 +26,7 @@ import { Circle, Download, History, Link, Plus, Settings, Square } from "lucide"
 import { isRestrictedUrl } from "./browser/cdp.js";
 import { setCurrentBrowserSession } from "./browser/current.js";
 import { dispatchToSandbox, setCdpMessageHandler } from "./browser/inject.js";
-import { BrowserSession, listSessions, sessionIdForTab } from "./browser/session.js";
+import { BrowserSession, listSessions, sessionIdForTab, sessionOwningTab } from "./browser/session.js";
 import { Toast } from "./components/Toast.js";
 import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
@@ -137,7 +137,10 @@ function publishBusyState(): void {
 	const busy = agent?.state.isStreaming === true;
 	if (busy === lastPublishedBusy) return;
 	lastPublishedBusy = busy;
-	chrome.storage.session.set({ [`sidepanel_busy_${currentWindowId}`]: busy }).catch(() => undefined);
+	// The value names the running task's home tab so the worker keeps exactly that panel up.
+	chrome.storage.session
+		.set({ [`sidepanel_busy_${currentWindowId}`]: busy ? (homeTabId ?? true) : false })
+		.catch(() => undefined);
 }
 window.addEventListener("pagehide", () => {
 	chrome.storage.session.remove(`sidepanel_busy_${currentWindowId}`).catch(() => undefined);
@@ -167,7 +170,12 @@ async function openBrowserSession(id: string): Promise<void> {
 	// this task's panel; other tabs are unaffected.
 	if (homeTabId !== undefined) {
 		await browserSession.setHomeTab(homeTabId);
-		await browserSession.adopt(homeTabId, true);
+		// A tab an external agent is driving stays with that agent; the panel only binds to it.
+		const owner = await sessionOwningTab(homeTabId);
+		if (!owner || owner.id === browserSession.id || !owner.id.startsWith("bridge-"))
+			// Only start on the home tab; re-opening (e.g. the rename on first save) must not yank
+			// the agent back from a tab it switched to.
+			await browserSession.adopt(homeTabId, browserSession.currentTabId === undefined);
 	}
 	renderApp();
 }
@@ -498,6 +506,23 @@ const updateUrl = (sessionId: string) => {
 	window.history.replaceState({}, "", url);
 };
 
+/**
+ * Self-hosted OpenAI-compatible endpoints (custom providers: Local Studio, vLLM, SGLang,
+ * llama.cpp) get no max_tokens: the dialog's per-model default was 8192, which cut
+ * thinking models off mid-answer. The server then applies the model's full context.
+ */
+function uncappedStreamFn<F extends (model: Model<any>, ...rest: any[]) => any>(inner: F): F {
+	return (async (model: Model<any>, ...rest: any[]) => {
+		if (model.api === "openai-completions") {
+			const custom = await storage.customProviders.getAll().catch(() => []);
+			if (custom.some((p) => p.name === model.provider)) {
+				model = { ...model, compat: { ...(model.compat ?? {}), omitMaxTokens: true } };
+			}
+		}
+		return inner(model, ...rest);
+	}) as F;
+}
+
 const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true) => {
 	if (agentUnsubscribe) {
 		agentUnsubscribe();
@@ -563,11 +588,13 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 		},
 		convertToLlm: browserMessageTransformer,
 		toolExecution: "sequential",
-		streamFn: createStreamFn(async () => {
-			const enabled = await storage.settings.get<boolean>("proxy.enabled");
-			if (!enabled) return undefined;
-			return (await storage.settings.get<string>("proxy.url")) || undefined;
-		}),
+		streamFn: uncappedStreamFn(
+			createStreamFn(async () => {
+				const enabled = await storage.settings.get<boolean>("proxy.enabled");
+				if (!enabled) return undefined;
+				return (await storage.settings.get<string>("proxy.url")) || undefined;
+			}),
+		),
 		getApiKey: async (provider: string) => {
 			const stored = await storage.providerKeys.get(provider);
 			if (!stored) return undefined;

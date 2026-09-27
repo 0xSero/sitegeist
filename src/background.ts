@@ -1,12 +1,22 @@
-import { startBridge } from "./bridge/native.js";
-import { startForegroundGuard } from "./browser/foreground-guard.js";
-import { cleanupOrphanGroups, listSessions } from "./browser/session.js";
+import { startBridge, trace } from "./bridge/native.js";
+import { setGuardLogger, startForegroundGuard } from "./browser/foreground-guard.js";
+import { BrowserSession, cleanupOrphanGroups, listSessions } from "./browser/session.js";
 
 // Keep popups opened by agent-driven background tabs from stealing the user's focus.
 startForegroundGuard();
+setGuardLogger(trace);
 
 // Groups from before an extension reload have no owning session any more; give the tabs back.
 cleanupOrphanGroups().catch(() => undefined);
+
+// Prerendered / instant pages commit into a new tab id; keep the owning session pointed at it.
+chrome.webNavigation.onTabReplaced.addListener(async ({ replacedTabId, tabId }) => {
+	for (const s of await listSessions()) {
+		if (!s.tabIds.includes(replacedTabId) && s.homeTabId !== replacedTabId) continue;
+		const session = await BrowserSession.open(s.id, s.label, s.windowId);
+		await session.replaceTabId(replacedTabId, tabId);
+	}
+});
 
 // External harnesses (omp, pi, Claude Code, Codex) drive the browser through the
 // native-messaging bridge. Connects when the CLI has installed the host manifest.
@@ -67,10 +77,12 @@ function recordPanelError(where: string, err: unknown): void {
 		.catch(() => undefined);
 }
 
-async function panelBusy(windowId: number): Promise<boolean> {
+/** Home tab of the task running in this window's panel, if one is mid-run. */
+async function busyHomeTab(windowId: number): Promise<number | undefined> {
 	const key = `${PANEL_BUSY_PREFIX}${windowId}`;
 	const data = await chrome.storage.session.get(key);
-	return data[key] === true;
+	const value = data[key];
+	return typeof value === "number" ? value : undefined;
 }
 
 interface OwnedTab {
@@ -86,6 +98,9 @@ async function ownedTabs(windowId: number): Promise<Map<number, OwnedTab>> {
 		const homeTabId = s.homeTabId ?? s.tabIds[0];
 		if (homeTabId === undefined) continue;
 		for (const tabId of s.tabIds) map.set(tabId, { sessionId: s.id, homeTabId });
+		// The home tab may be owned by an agent session (the panel was opened on its tab);
+		// it still shows this task's panel.
+		map.set(homeTabId, { sessionId: s.id, homeTabId });
 	}
 	return map;
 }
@@ -122,18 +137,27 @@ async function reconcileActiveTab(windowId: number, tabId: number): Promise<void
 		await applyTab(tabId, `${PANEL_PATH}?tabId=${own.homeTabId}`);
 		return;
 	}
-	if (openSidepanels.has(windowId) && (await panelBusy(windowId))) {
-		const running = owned.values().next().value as OwnedTab | undefined;
-		if (running) {
-			await applyTab(tabId, `${PANEL_PATH}?tabId=${running.homeTabId}`);
-			return;
-		}
+	const runningHome = openSidepanels.has(windowId) ? await busyHomeTab(windowId) : undefined;
+	if (runningHome !== undefined) {
+		await applyTab(tabId, `${PANEL_PATH}?tabId=${runningHome}`);
+		return;
 	}
 	await applyTab(tabId, undefined);
 }
 
-/** Open the panel on a tab the user deliberately clicked, binding it to that tab. */
+/**
+ * Open the panel on a tab the user deliberately clicked. A tab that already shows a panel
+ * (its own task, or a running task kept visible while the user looks around) opens that
+ * panel as is: re-pointing it would reload the panel document and kill the agent running
+ * in it. Any other tab gets a fresh task bound to it.
+ */
 function openPanelOnTab(tabId: number, source: string): void {
+	const existing = panelPathCache.get(tabId);
+	if (existing) {
+		chrome.sidePanel.open({ tabId }).catch((err) => recordPanelError(`open(${source})`, err));
+		panelLog(`open tab=${tabId} (${source}, existing ${existing})`);
+		return;
+	}
 	const path = `${PANEL_PATH}?tabId=${tabId}`;
 	panelPathCache.set(tabId, path);
 	// Both calls must run in the click's user-gesture tick; Chrome applies them in order.

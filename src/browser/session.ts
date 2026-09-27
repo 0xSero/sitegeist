@@ -13,7 +13,7 @@
  * restart.
  */
 
-import { detachTab, ensureAttached, isRestrictedUrl } from "./cdp.js";
+import { detachTab, ensureAttached, isRestrictedUrl, releaseAgentViewport } from "./cdp.js";
 
 const STORAGE_KEY = "browser_sessions";
 const GROUP_PREFIX = "Sitegeist";
@@ -34,6 +34,8 @@ export interface TabInfo {
 	title: string;
 	current: boolean;
 	favicon?: string;
+	/** False when the tab sits outside the session's group (dragged out, or grouping failed). */
+	inGroup: boolean;
 }
 
 interface PersistedSession {
@@ -46,6 +48,8 @@ interface PersistedSession {
 	currentTabId?: number;
 	/** The tab the panel that owns this session was opened on (Claude-style per-tab binding). */
 	homeTabId?: number;
+	/** Last time a tool touched the session (ms since epoch); drives cleanup of abandoned sessions. */
+	lastUsedAt?: number;
 }
 
 type SessionTable = Record<string, PersistedSession>;
@@ -120,6 +124,79 @@ export async function cleanupOrphanGroups(): Promise<number> {
 	return released;
 }
 
+function isBlankUrl(url: string | undefined): boolean {
+	return (
+		!url ||
+		url === "about:blank" ||
+		url.startsWith("chrome://newtab") ||
+		url.startsWith("brave://newtab") ||
+		url.startsWith("edge://newtab") ||
+		url.startsWith("chrome://new-tab-page")
+	);
+}
+
+/**
+ * Tidy the session table. Dead tab ids are dropped everywhere. Bridge sessions whose
+ * client is gone (`liveIds` lacks them) lose their blank tabs, are forgotten once they
+ * own nothing, and have their group collapsed after `idleMs` so finished agent work
+ * stops cluttering the tab strip (one click on the group closes it). Side-panel sessions
+ * are left alone apart from dead ids: their tabs are the user's.
+ */
+export async function pruneSessions(
+	liveIds: Set<string>,
+	idleMs = 30 * 60 * 1000,
+): Promise<{
+	dropped: number;
+	closedTabs: number;
+}> {
+	const table = await readTable();
+	const liveTabs = new Map<number, chrome.tabs.Tab>();
+	for (const t of await chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[])) {
+		if (t.id !== undefined) liveTabs.set(t.id, t);
+	}
+	let dropped = 0;
+	let closedTabs = 0;
+	const now = Date.now();
+	for (const s of Object.values(table)) {
+		const inst = instances.get(s.id);
+		const state = inst ? (inst as unknown as { state: PersistedSession }).state : s;
+		state.tabIds = state.tabIds.filter((id) => liveTabs.has(id));
+		if (state.currentTabId !== undefined && !liveTabs.has(state.currentTabId))
+			state.currentTabId = state.tabIds[state.tabIds.length - 1];
+		if (state.homeTabId !== undefined && !liveTabs.has(state.homeTabId)) state.homeTabId = undefined;
+		const isBridge = state.id.startsWith("bridge-");
+		if (isBridge && !liveIds.has(state.id)) {
+			for (const id of [...state.tabIds]) {
+				const tab = liveTabs.get(id);
+				if (!tab || !isBlankUrl(tab.url ?? tab.pendingUrl) || tab.active) continue;
+				await chrome.tabs.remove(id).catch(() => undefined);
+				state.tabIds = state.tabIds.filter((x) => x !== id);
+				closedTabs++;
+			}
+			if (state.currentTabId !== undefined && !state.tabIds.includes(state.currentTabId))
+				state.currentTabId = state.tabIds[state.tabIds.length - 1];
+			if (state.tabIds.length === 0) {
+				delete table[state.id];
+				instances.delete(state.id);
+				dropped++;
+				continue;
+			}
+			const userLooking = state.tabIds.some((id) => liveTabs.get(id)?.active);
+			if (state.groupId !== undefined && !userLooking && now - (state.lastUsedAt ?? 0) > idleMs) {
+				await chrome.tabGroups.update(state.groupId, { collapsed: true }).catch(() => undefined);
+			}
+		} else if (!isBridge && state.tabIds.length === 0 && state.homeTabId === undefined) {
+			delete table[state.id];
+			instances.delete(state.id);
+			dropped++;
+			continue;
+		}
+		table[state.id] = state;
+	}
+	await writeTable(table);
+	return { dropped, closedTabs };
+}
+
 /**
  * Keep a single live side-panel group per window: release every other non-bridge
  * session in the window (ungroup its tabs, which stay open, and forget it).
@@ -129,13 +206,24 @@ export async function releaseOtherPanelSessions(windowId: number, keepId: string
 	for (const s of Object.values(table)) {
 		if (s.id === keepId || s.id.startsWith("bridge-") || s.windowId !== windowId) continue;
 		for (const tabId of s.tabIds) {
-			await detachTab(tabId);
+			await detachTab(tabId, true);
 			await chrome.tabs.ungroup(tabId).catch(() => undefined);
 		}
 		delete table[s.id];
 		instances.delete(s.id);
 	}
 	await writeTable(table);
+}
+
+/** "omp", then "omp 2", "omp 3" ...: two agents must not share a group title. */
+function uniqueLabel(table: SessionTable, label: string, selfId?: string): string {
+	const taken = new Set(
+		Object.values(table)
+			.filter((s) => s.id !== selfId)
+			.map((s) => s.label),
+	);
+	if (!taken.has(label)) return label;
+	for (let n = 2; ; n++) if (!taken.has(`${label} ${n}`)) return `${label} ${n}`;
 }
 
 function pickColor(table: SessionTable): `${chrome.tabGroups.Color}` {
@@ -148,6 +236,12 @@ async function tabExists(tabId: number): Promise<chrome.tabs.Tab | undefined> {
 		return await chrome.tabs.get(tabId);
 	} catch {
 		return undefined;
+	}
+}
+
+export class NoTabError extends Error {
+	constructor() {
+		super("This session has no tab yet. Call navigate with a URL first (it opens a tab in your group).");
 	}
 }
 
@@ -220,13 +314,13 @@ export class BrowserSession {
 		if (!state) {
 			state = {
 				id,
-				label,
+				label: uniqueLabel(table, label),
 				color: pickColor(table),
 				windowId: windowId ?? (await lastFocusedWindowId()),
 				tabIds: [],
 			};
 		} else {
-			state.label = label;
+			if (state.label !== label && !state.label.startsWith(`${label} `)) state.label = uniqueLabel(table, label, id);
 			if (windowId !== undefined) state.windowId = windowId;
 		}
 		const session = new BrowserSession(state);
@@ -253,6 +347,7 @@ export class BrowserSession {
 	}
 
 	private async persist(): Promise<void> {
+		this.state.lastUsedAt = Date.now();
 		const table = await readTable();
 		table[this.state.id] = this.state;
 		await writeTable(table);
@@ -271,16 +366,30 @@ export class BrowserSession {
 		if (this.state.homeTabId !== undefined && !(await tabExists(this.state.homeTabId))) {
 			this.state.homeTabId = undefined;
 		}
+		// A group belongs to exactly one session. (Re-finding a group by title used to hand a
+		// fresh session another agent's group whenever their labels matched.)
+		const table = await readTable();
+		const claimedElsewhere =
+			this.state.groupId !== undefined &&
+			Object.values(table).some((s) => s.id !== this.state.id && s.groupId === this.state.groupId);
+		const group = claimedElsewhere ? undefined : await this.liveGroup();
+		if (!group) this.state.groupId = undefined;
+		// Chrome puts tabs opened from a grouped tab into that group; those are this agent's.
 		if (this.state.groupId !== undefined) {
-			try {
-				await chrome.tabGroups.get(this.state.groupId);
-			} catch {
-				this.state.groupId = undefined;
+			const others = new Set<number>();
+			for (const s of Object.values(table)) if (s.id !== this.state.id) for (const id of s.tabIds) others.add(id);
+			for (const t of await chrome.tabs
+				.query({ groupId: this.state.groupId })
+				.catch(() => [] as chrome.tabs.Tab[])) {
+				if (t.id !== undefined && !alive.includes(t.id) && !others.has(t.id)) alive.push(t.id);
 			}
+			this.state.tabIds = alive;
 		}
-		if (this.state.groupId === undefined && alive.length === 0) {
-			const found = await chrome.tabGroups.query({ title: this.groupTitle() });
-			if (found[0]?.id !== undefined) this.state.groupId = found[0].id;
+		// Tabs that fell out of the group (or never made it in) go back, so the user always sees
+		// an agent's tabs together.
+		for (const id of alive) {
+			const tab = await tabExists(id);
+			if (tab && (this.state.groupId === undefined || tab.groupId !== this.state.groupId)) await this.groupTab(id);
 		}
 		await this.persist();
 	}
@@ -302,44 +411,75 @@ export class BrowserSession {
 		await this.persist();
 	}
 
-	/** Put a tab into the session group, creating the group in the session window. */
+	/** The session's group if it still exists. */
+	private async liveGroup(): Promise<chrome.tabGroups.TabGroup | undefined> {
+		if (this.state.groupId === undefined) return undefined;
+		try {
+			return await chrome.tabGroups.get(this.state.groupId);
+		} catch {
+			this.state.groupId = undefined;
+			return undefined;
+		}
+	}
+
+	/**
+	 * Put a tab into the session group, creating the group in the tab's window. A tab in
+	 * another window is moved next to the group first (a group cannot span windows). If the
+	 * existing group refuses the tab, a fresh group is made rather than leaving it loose.
+	 */
 	private async groupTab(tabId: number): Promise<void> {
 		try {
-			if (this.state.groupId !== undefined) {
+			let tab = await chrome.tabs.get(tabId);
+			if (tab.pinned) return; // pinned tabs cannot be grouped
+			const win = await chrome.windows.get(tab.windowId).catch(() => undefined);
+			if (win && win.type !== "normal") return; // popups and app windows have no tab strip
+			const group = await this.liveGroup();
+			if (group && tab.groupId === group.id) return;
+			if (group) {
 				try {
-					await chrome.tabGroups.get(this.state.groupId);
-				} catch {
+					if (group.windowId !== tab.windowId) {
+						await withGroupRetry(() => chrome.tabs.move(tabId, { windowId: group.windowId, index: -1 }));
+						tab = await chrome.tabs.get(tabId);
+					}
+					await withGroupRetry(() => chrome.tabs.group({ tabIds: [tabId], groupId: group.id }));
+					return;
+				} catch (err) {
+					console.warn("[BrowserSession] joining group failed, starting a new one:", err);
 					this.state.groupId = undefined;
 				}
 			}
-			if (this.state.groupId !== undefined) {
-				const groupId = this.state.groupId;
-				await withGroupRetry(() => chrome.tabs.group({ tabIds: [tabId], groupId }));
-			} else {
-				const tab = await chrome.tabs.get(tabId);
-				// A tab already in someone else's group has to leave it first.
-				if (tab.groupId !== undefined && tab.groupId !== -1)
-					await chrome.tabs.ungroup(tabId).catch(() => undefined);
-				this.state.groupId = await withGroupRetry(() =>
-					chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } }),
-				);
-				await chrome.tabGroups.update(this.state.groupId, { title: this.groupTitle(), color: this.state.color });
-			}
+			if (tab.groupId !== undefined && tab.groupId !== -1) await chrome.tabs.ungroup(tabId).catch(() => undefined);
+			this.state.groupId = await withGroupRetry(() =>
+				chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } }),
+			);
+			this.state.windowId = tab.windowId;
+			await chrome.tabGroups.update(this.state.groupId, { title: this.groupTitle(), color: this.state.color });
 		} catch (err) {
-			// Grouping is cosmetic; a pinned tab or a closing window must not fail the tool.
+			// A closing window or a tab being dragged must not fail the tool; the tab stays owned.
 			console.warn("[BrowserSession] group failed:", err);
 		}
 	}
 
-	/** Create a new inactive tab in the session window and make it current. */
-	async createTab(url?: string): Promise<chrome.tabs.Tab> {
-		let windowId = this.state.windowId;
+	/** Window for new tabs: the group's window when it exists, else the session window. */
+	private async targetWindowId(): Promise<number> {
+		const group = await this.liveGroup();
+		if (group) return group.windowId;
 		try {
-			await chrome.windows.get(windowId);
+			const win = await chrome.windows.get(this.state.windowId);
+			if (win.type === "normal") return this.state.windowId;
 		} catch {
-			windowId = await lastFocusedWindowId();
-			this.state.windowId = windowId;
+			/* window gone */
 		}
+		this.state.windowId = await lastFocusedWindowId();
+		return this.state.windowId;
+	}
+
+	/**
+	 * Create a new inactive tab in the session's group and make it current. With a url the
+	 * tab loads it directly (callers wait for the load); without one it starts blank.
+	 */
+	async createTab(url?: string): Promise<chrome.tabs.Tab> {
+		const windowId = await this.targetWindowId();
 		const tab = await chrome.tabs.create({ url: url ?? "about:blank", windowId, active: false });
 		if (tab.id === undefined) throw new Error("Failed to create tab");
 		await this.adopt(tab.id);
@@ -348,9 +488,30 @@ export class BrowserSession {
 
 	/** Take ownership of an existing tab (user handed it over, or a popup opened from an owned tab). */
 	async adopt(tabId: number, makeCurrent = true): Promise<void> {
+		// A tab belongs to one session; take it away from whoever had it before.
+		const table = await readTable();
+		for (const s of Object.values(table)) {
+			if (s.id === this.state.id || !s.tabIds.includes(tabId)) continue;
+			const other = instances.get(s.id);
+			const target = other ? other.state : s;
+			target.tabIds = target.tabIds.filter((id) => id !== tabId);
+			if (target.currentTabId === tabId) target.currentTabId = target.tabIds[target.tabIds.length - 1];
+			table[s.id] = target;
+		}
+		await writeTable(table);
 		if (!this.state.tabIds.includes(tabId)) this.state.tabIds.push(tabId);
 		if (makeCurrent) this.state.currentTabId = tabId;
 		await this.groupTab(tabId);
+		await this.persist();
+	}
+
+	/** Swap a tab id Chrome replaced (prerender/instant pages commit into a new tab). */
+	async replaceTabId(oldId: number, newId: number): Promise<void> {
+		if (!this.state.tabIds.includes(oldId)) return;
+		this.state.tabIds = this.state.tabIds.map((id) => (id === oldId ? newId : id));
+		if (this.state.currentTabId === oldId) this.state.currentTabId = newId;
+		if (this.state.homeTabId === oldId) this.state.homeTabId = newId;
+		await this.groupTab(newId);
 		await this.persist();
 	}
 
@@ -358,7 +519,7 @@ export class BrowserSession {
 	async release(tabId: number): Promise<void> {
 		this.state.tabIds = this.state.tabIds.filter((id) => id !== tabId);
 		if (this.state.currentTabId === tabId) this.state.currentTabId = this.state.tabIds[this.state.tabIds.length - 1];
-		await detachTab(tabId);
+		await detachTab(tabId, true);
 		try {
 			await chrome.tabs.ungroup(tabId);
 		} catch {
@@ -402,13 +563,13 @@ export class BrowserSession {
 	}
 
 	/**
-	 * Current tab, creating one when the session is empty. Tools that need a page
-	 * call this; a fresh session then starts on about:blank instead of failing.
+	 * Current tab for tools that need a page. An empty session does not get a blank tab
+	 * conjured up (those piled up as empty tabs); the model is told to navigate first.
 	 */
 	async requireCurrentTab(): Promise<chrome.tabs.Tab> {
 		const tab = await this.currentTab();
 		if (tab) return tab;
-		return this.createTab();
+		throw new NoTabError();
 	}
 
 	/** Current tab with the debugger attached, for CDP-based tools. */
@@ -437,6 +598,7 @@ export class BrowserSession {
 				title: tab.title ?? "",
 				current: id === this.state.currentTabId,
 				favicon: tab.favIconUrl,
+				inGroup: this.state.groupId !== undefined && tab.groupId === this.state.groupId,
 			});
 		}
 		return out;
@@ -449,6 +611,7 @@ export class BrowserSession {
 		if (!this.state.tabIds.includes(id)) throw new Error(`Tab ${id} is not owned by this session`);
 		const tab = await tabExists(id);
 		if (!tab) return;
+		await releaseAgentViewport(id);
 		await chrome.tabs.update(id, { active: true });
 		await chrome.windows.update(tab.windowId, { focused: true });
 	}
@@ -460,7 +623,7 @@ export class BrowserSession {
 
 	/** Detach debuggers and forget the session; tabs stay open for the user. */
 	async close(): Promise<void> {
-		for (const id of this.state.tabIds) await detachTab(id);
+		for (const id of this.state.tabIds) await detachTab(id, true);
 		const table = await readTable();
 		delete table[this.state.id];
 		await writeTable(table);

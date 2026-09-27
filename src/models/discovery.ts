@@ -47,7 +47,14 @@ async function getJson<T>(url: string, headers: Record<string, string>, signal: 
 }
 
 interface OpenAIListResponse {
-	data: Array<{ id: string; context_length?: number; max_tokens?: number; capabilities?: Record<string, unknown> }>;
+	data: Array<{
+		id: string;
+		context_length?: number;
+		/** vLLM / SGLang / Local Studio report the served context here. */
+		max_model_len?: number;
+		max_tokens?: number;
+		capabilities?: Record<string, unknown>;
+	}>;
 }
 
 function openAiCompatible(baseUrl: string, api: Api, extraHeaders: Record<string, string> = {}): Adapter {
@@ -63,7 +70,7 @@ function openAiCompatible(baseUrl: string, api: Api, extraHeaders: Record<string
 				id: m.id,
 				api,
 				baseUrl,
-				contextWindow: m.context_length,
+				contextWindow: m.context_length ?? m.max_model_len,
 				maxTokens: m.max_tokens,
 			}));
 	};

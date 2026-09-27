@@ -6,7 +6,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import { html } from "lit";
 import { Loader2 } from "lucide";
 import { getCurrentBrowserSession } from "../browser/current.js";
-import { goBack, goForward, navigateTab } from "../browser/page.js";
+import { goBack, goForward, navigateTab, waitForLoad } from "../browser/page.js";
 import { SkillPill } from "../components/SkillPill.js";
 import { TabPill } from "../components/TabPill.js";
 import { NAVIGATE_TOOL_DESCRIPTION } from "../prompts/prompts.js";
@@ -133,14 +133,18 @@ export class NavigateTool implements AgentTool<typeof navigateSchema, NavigateRe
 				if (args.url === "back") await goBack(tabId);
 				else await goForward(tabId);
 				finalUrl = (await chrome.tabs.get(tabId)).url ?? "";
-			} else if (args.newTab) {
-				const tab = await session.createTab(args.url);
-				tabId = tab.id!;
-				finalUrl = await navigateTab(tabId, args.url, { signal });
 			} else {
-				const tab = await session.requireCurrentTab();
-				tabId = tab.id!;
-				finalUrl = await navigateTab(tabId, args.url, { signal });
+				const current = args.newTab ? undefined : await session.currentTab();
+				if (current?.id !== undefined) {
+					tabId = current.id;
+					finalUrl = await navigateTab(tabId, args.url, { signal });
+				} else {
+					// New tab (asked for, or the session has none yet): open it on the URL directly.
+					const tab = await session.createTab(args.url);
+					tabId = tab.id!;
+					await waitForLoad(tabId, 20000);
+					finalUrl = (await chrome.tabs.get(tabId)).url ?? args.url;
+				}
 			}
 			const prefix = args.newTab
 				? `Opened in new tab: ${finalUrl} (tab ${tabId})`

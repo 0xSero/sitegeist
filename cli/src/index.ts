@@ -16,6 +16,8 @@ Usage:
   sitegeist status          Show whether the extension is reachable
   sitegeist reload          Reload the extension (picks up a rebuilt dist-chrome)
   sitegeist allow <host>    Allow agents to open a site (subdomains included)
+  sitegeist yolo            Allow agents to open ANY site (no per-site prompts)
+  sitegeist ask             Require a prompt before agents open an un-allowed site (default)
   sitegeist debug           Print the extension's bridge state and recent timing log
   sitegeist pi-extension    Write a pi extension to ~/.pi/agent/extensions/sitegeist.ts
   sitegeist host            (internal) native messaging host, spawned by the browser
@@ -79,6 +81,15 @@ async function main(): Promise<void> {
 			const client = new BridgeClient({ name: "allow" });
 			await client.connect();
 			console.log(JSON.stringify(await client.call("permission.allow", { host }, 5000)));
+			client.close();
+			return;
+		}
+		case "yolo":
+		case "ask": {
+			const mode = command === "yolo" ? "allow_all" : "ask";
+			const client = new BridgeClient({ name: command });
+			await client.connect();
+			console.log(JSON.stringify(await client.call("permission.setMode", { mode }, 5000)));
 			client.close();
 			return;
 		}

@@ -7,8 +7,9 @@
  * backoff and on a 30 s alarm, which also keeps the worker alive.
  */
 
+import { stopScreencastsOwnedBy } from "../browser/cdp.js";
 import { setCdpMessageHandler } from "../browser/inject.js";
-import { BrowserSession, listSessions } from "../browser/session.js";
+import { BrowserSession, listSessions, NoTabError, pruneSessions } from "../browser/session.js";
 import {
 	addPendingRequest,
 	allowHost,
@@ -18,7 +19,9 @@ import {
 	isBridgeEnabled,
 	isUrlAllowed,
 	type PermissionDecision,
+	type PermissionMode,
 	removePendingRequest,
+	setPermissionMode,
 } from "./permissions.js";
 import {
 	BRIDGE_METHODS,
@@ -37,7 +40,7 @@ const WORKER_STARTED_AT = Date.now();
 const LOG_MAX = 200;
 /** Ring buffer of timing lines, readable through bridge.debug. */
 const log: string[] = [];
-function trace(line: string): void {
+export function trace(line: string): void {
 	log.push(`${new Date().toISOString().slice(11, 23)} ${line}`);
 	if (log.length > LOG_MAX) log.splice(0, log.length - LOG_MAX);
 }
@@ -121,6 +124,7 @@ async function onClientConnected(msg: HostClientConnected): Promise<void> {
 async function onClientDisconnected(clientId: string): Promise<void> {
 	const state = clients.get(clientId);
 	clients.delete(clientId);
+	await stopScreencastsOwnedBy(clientId).catch(() => undefined);
 	if (state?.session) {
 		// A session that never opened a tab has nothing to re-adopt; drop it instead of piling up.
 		if (state.session.tabIds.length === 0) await state.session.close();
@@ -194,6 +198,8 @@ async function runRequest(state: ClientState, req: HostForwardedRequest): Promis
 		const tSession = Math.round(performance.now() - t0);
 		const ctx: HandlerContext = {
 			session,
+			clientId: state.clientId,
+			emit: (event, data) => send({ type: "event", clientId: state.clientId, event, data }),
 			checkUrl: async (url: string) => {
 				if (!(await askPermission(state, url))) {
 					const mode = await getPermissionMode();
@@ -214,6 +220,7 @@ async function runRequest(state: ClientState, req: HostForwardedRequest): Promis
 		state.lastError = `${req.method}: ${err instanceof Error ? err.message : String(err)}`;
 		console.warn("[Bridge]", state.lastError);
 		if (err instanceof BridgeError) reply(undefined, err);
+		else if (err instanceof NoTabError) reply(undefined, new BridgeError(ERR.NO_TAB, err.message));
 		else reply(undefined, new BridgeError(ERR.INTERNAL, err instanceof Error ? err.message : String(err)));
 	} finally {
 		state.inFlight = undefined;
@@ -264,6 +271,24 @@ function onHostMessage(message: HostToExt): void {
 				);
 				return;
 			}
+			if (message.method === "permission.setMode") {
+				// `sitegeist yolo` / `sitegeist ask`: a local user process flipping the site-permission mode,
+				// same trust as the Settings > Bridge toggle.
+				const mode = String(message.params?.mode ?? "");
+				if (mode !== "ask" && mode !== "allow_all") {
+					send({
+						type: "response",
+						clientId: message.clientId,
+						id: message.id,
+						error: { code: ERR.BAD_PARAMS, message: "mode must be ask or allow_all" },
+					});
+					return;
+				}
+				setPermissionMode(mode as PermissionMode).then(() =>
+					send({ type: "response", clientId: message.clientId, id: message.id, result: { mode } }),
+				);
+				return;
+			}
 			if (message.method === "bridge.debug") {
 				Promise.all([
 					listSessions(),
@@ -277,12 +302,18 @@ function onHostMessage(message: HostToExt): void {
 								.map((g) => ({ id: g.id, title: g.title, windowId: g.windowId })),
 						)
 						.catch(() => []),
+					chrome.windows.getAll({ populate: true, windowTypes: ["normal"] }).then((wins) =>
+						wins.map((w) => {
+							const active = w.tabs?.find((t) => t.active);
+							return { windowId: w.id, focused: w.focused, activeTabId: active?.id, activeUrl: active?.url };
+						}),
+					),
 					chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(async ([tab]) => {
 						if (!tab?.id) return null;
 						const options = await chrome.sidePanel.getOptions({ tabId: tab.id }).catch(() => null);
 						return { tabId: tab.id, url: tab.url, groupId: tab.groupId, options };
 					}),
-				]).then(([sessions, perms, panelState, groups, activeTab]) =>
+				]).then(([sessions, perms, panelState, groups, windows, activeTab]) =>
 					send({
 						type: "response",
 						clientId: message.clientId,
@@ -291,6 +322,7 @@ function onHostMessage(message: HostToExt): void {
 							version: chrome.runtime.getManifest().version,
 							userScriptsApi: typeof (chrome as { userScripts?: unknown }).userScripts !== "undefined",
 							sidePanel: { ...panelState, activeTab, groups },
+							windows,
 							grantedPermissions: perms.permissions ?? [],
 							workerUptimeS: Math.round((Date.now() - WORKER_STARTED_AT) / 1000),
 							log: [...log],
@@ -307,6 +339,7 @@ function onHostMessage(message: HostToExt): void {
 								label: s.label,
 								tabs: s.tabIds.length,
 								windowId: s.windowId,
+								groupId: s.groupId,
 							})),
 						},
 					}),
@@ -342,6 +375,18 @@ function onHostMessage(message: HostToExt): void {
 					});
 					send({ type: "response", clientId: message.clientId, id: message.id, result: timings });
 				})();
+				return;
+			}
+			if (message.method === "bridge.activate") {
+				// Development aid: put a given tab back in front (e.g. after a test popup stole focus).
+				const tabId = Number(message.params?.tabId);
+				chrome.tabs
+					.update(tabId, { active: true })
+					.then(
+						() => ({ result: { activated: tabId } }),
+						(err: Error) => ({ error: { code: ERR.NOT_FOUND, message: err.message } }),
+					)
+					.then((r) => send({ type: "response", clientId: message.clientId, id: message.id, ...r }));
 				return;
 			}
 			if (message.method === "bridge.reload") {
@@ -397,6 +442,7 @@ function connect(): void {
 		if (port === next) port = undefined;
 		for (const state of clients.values()) void state.session?.suspend();
 		clients.clear();
+		void stopScreencastsOwnedBy(undefined).catch(() => undefined);
 		scheduleReconnect();
 	});
 	reconnectDelay = RECONNECT_MIN_MS;
@@ -422,16 +468,34 @@ async function dropEmptyBridgeSessions(): Promise<void> {
 	}
 }
 
+/** Session keys of the harnesses connected right now. */
+function liveSessionKeys(): Set<string> {
+	return new Set([...clients.values()].map((c) => c.sessionKey));
+}
+
+async function prune(reason: string): Promise<void> {
+	const result = await pruneSessions(liveSessionKeys());
+	if (result.dropped || result.closedTabs)
+		trace(`prune(${reason}) dropped=${result.dropped} closedBlankTabs=${result.closedTabs}`);
+}
+
+let alarmTicks = 0;
+
 /** Wire the bridge into the service worker. Safe to call on every worker start. */
 export function startBridge(): void {
 	dropEmptyBridgeSessions().catch(() => undefined);
+	// Clients are re-announced when the host sees our hello; give that a moment before
+	// deciding which bridge sessions are abandoned.
+	setTimeout(() => void prune("startup").catch(() => undefined), 20000);
 	// Injected code has no runtime providers in the worker; echo so callers can probe the shim.
 	setCdpMessageHandler(async (message) => ({ echo: message }));
 	chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
 	chrome.alarms.onAlarm.addListener((alarm) => {
 		if (alarm.name === ALARM_NAME) {
-			trace(`alarm (port ${port ? "open" : "closed"})`);
+			if (!port) trace("alarm: port closed, reconnecting");
 			connect();
+			// Every 5 minutes: forget dead tabs, close blank tabs of abandoned sessions.
+			if (++alarmTicks % 10 === 0) void prune("periodic").catch(() => undefined);
 		}
 	});
 	chrome.storage.onChanged.addListener((changes, area) => {

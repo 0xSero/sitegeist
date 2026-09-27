@@ -126,9 +126,14 @@ async function fetchAndResizeImage(src: string, maxWidth: number): Promise<Image
 	return { type: "image", data: base64, mimeType: "image/png" };
 }
 
-async function captureTabScreenshot(maxWidth: number, tabId: number): Promise<ImageContent> {
+async function captureTabScreenshot(maxWidth: number, tabId: number): Promise<{ image: ImageContent; note: string }> {
 	const shot = await captureScreenshot(tabId, { maxWidth });
-	return { type: "image", data: shot.data, mimeType: shot.mimeType };
+	const factor = shot.cssWidth / shot.width;
+	const note =
+		Math.abs(factor - 1) < 0.02
+			? `${shot.width}x${shot.height}; image pixels equal page (CSS) coordinates`
+			: `${shot.width}x${shot.height}; viewport is ${shot.cssWidth}x${shot.cssHeight} CSS px, multiply image x/y by ${factor.toFixed(3)} for page coordinates`;
+	return { image: { type: "image", data: shot.data, mimeType: shot.mimeType }, note };
 }
 
 export class ExtractImageTool implements AgentTool<typeof extractImageSchema, ExtractImageDetails> {
@@ -148,9 +153,9 @@ export class ExtractImageTool implements AgentTool<typeof extractImageSchema, Ex
 
 		if (args.mode === "screenshot") {
 			const tab = await getCurrentBrowserSession().attachedCurrentTab();
-			const image = await captureTabScreenshot(maxWidth, tab.id!);
-			content.push(image);
-			content.push({ type: "text", text: `Screenshot captured (max ${maxWidth}px width)` });
+			const shot = await captureTabScreenshot(maxWidth, tab.id!);
+			content.push(shot.image);
+			content.push({ type: "text", text: `Screenshot captured: ${shot.note}` });
 		} else if (args.mode === "selector") {
 			if (!args.selector) throw new Error("selector is required for 'selector' mode");
 			const tab = await getCurrentBrowserSession().requireCurrentTab();
